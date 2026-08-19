@@ -18,15 +18,17 @@ a final PDF report.
 | Stage | Status |
 |---|---|
 | PDF extraction + noise cleaning | Done (`src/ingestion.py`) |
-| Chunking | Not started |
-| Embeddings | Not started |
-| FAISS vector store | Not started |
-| Retrieval + LLM integration | Not started |
-| Conversational memory | Not started |
+| Chunking | Done (`src/chunking.py`) — 398 chunks, sizes validated after the segment-splitting fix |
+| Embeddings | Done (`src/vectorstore.py`) — `embed_texts()`, batched + normalized |
+| FAISS vector store | Done (`src/vectorstore.py`) — `IndexFlatIP`, persisted, reload-verified |
+| Retrieval + LLM integration | Done (`src/bot.py`) — verified end-to-end with real questions |
+| Conversational memory | Done (`src/bot.py`, `ChatSession`) — verified `deque(maxlen=4)` eviction with a live multi-turn test |
 | Test harness (10 questions) | Not started |
 | Evaluation scoring | Not started |
 | Final report | Not started |
 | Bonus: feedback into memory | Not started |
+
+First commit made: `3e289c2` on `main` — covers everything through the bot, plus this plan and the Python glossary. `data/pdfs/`, `src/`, `PLAN.md`, `PYTHON_GLOSSARY.md`, `.gitignore` tracked; `.venv/`, `__pycache__/`, and `data/processed/` (regeneratable artifacts) excluded.
 
 ## Two key decisions already made
 
@@ -144,7 +146,7 @@ minimum size — one run produced a 60-word trailing chunk. Low priority (affect
 chunk per document, 5 total across the corpus) but worth revisiting if retrieval quality on
 short answers looks weak later.
 
-## Stage 2 — Embeddings (`src/embeddings.py`)
+## Stage 2 — Embeddings (implemented in `src/vectorstore.py`, combined with Stage 3)
 
 **Why batch the calls to Ollama:** `/api/embed` accepts a list of strings and returns a list
 of vectors in one HTTP round trip. Calling it once per chunk (a few hundred separate HTTP
@@ -161,6 +163,11 @@ returned vector → stack into one NumPy array of shape `(num_chunks, 768)` (768
 embedding dimension) → save as `data/processed/embeddings.npy`. Row `i` must correspond to
 `chunks.json[i]` — this positional link is the single most important invariant in the whole
 pipeline.
+
+**Implemented as planned**, with a retry loop (`MAX_RETRIES = 3`, exponential backoff) around
+each batch call. `embed_texts()` is reused unchanged by `bot.py` to embed the user's question
+at retrieval time — confirmed working via a live sample query at the end of `vectorstore.py`'s
+driver ("self-attention mechanism formula" → correctly surfaced Transformer-paper chunks).
 
 ## Stage 3 — FAISS vector store (`src/vectorstore.py`)
 
@@ -179,6 +186,9 @@ already in the same fixed order the index was built from, it doubles as the meta
 **How:** build the index from `embeddings.npy`, persist with `faiss.write_index`, reload with
 `faiss.read_index` (no recomputation needed on reload — the whole point of persisting it).
 
+**Implemented as planned.** Validated: 398 vectors indexed, reload check passed
+(`ntotal == len(chunks)`), and a real query returned correctly relevant chunks.
+
 ## Stage 4 — Retrieval + LLM integration (`src/bot.py`)
 
 **Why this prompt structure:** the system message (fixed instructions: answer only from the
@@ -188,8 +198,20 @@ retrieved context in the *user* message rather than mutating the system prompt e
 cleaner mental model and avoids the system prompt growing unbounded.
 
 **How:** embed the user's question the same way chunks were embedded (same normalization) →
-FAISS top-k search → format retrieved chunks as labeled context blocks → send to `llama3.2`
-via `/api/chat`.
+FAISS top-k search (`TOP_K = 5`) → format retrieved chunks as labeled context blocks
+(`[Source: doc_id, page X]` + text) → send to `llama3.2` via `/api/chat`.
+
+**Implemented and validated end-to-end** in `src/bot.py` (`retrieve()`, `format_context()`,
+`call_llama()`). Confirmed with a real interactive session: a vague question ("brief of this
+document") correctly retrieved and summarized real BERT-paper content, not hallucinated text.
+
+**Known nuance (worth noting in the report, not a bug):** `retrieve()` re-embeds and searches
+using only the *current* question's text — it does not factor in conversation history when
+deciding what to search for. So a follow-up question can legitimately retrieve chunks from a
+*different* paper than the one just discussed, if that paper has a better-matching passage.
+Memory affects how the LLM *interprets* a follow-up question; it does not make retrieval
+itself conversation-aware. A more advanced system might rewrite follow-up queries using
+history before embedding — out of scope here, but worth naming as a limitation later.
 
 ## Stage 5 — Conversational memory
 
@@ -201,6 +223,12 @@ get wrong.
 **How:** a small `ChatSession` class holds the deque of `{user, assistant}` turn pairs; each
 call to `ask()` expands stored turns into the `/api/chat` messages list ahead of the current
 question, then appends the new turn (auto-evicting the oldest if now at 5).
+
+**Implemented and validated.** A debug line (`print(f"[memory: {len(self.history)} turn(s)
+currently held]")`) was added to `ask()` so the held-turn count is directly observable while
+chatting, rather than relying on the LLM's own (unreliable) self-report of what it remembers —
+a live 6-turn test confirmed the count climbs 0→4 and then stays capped at 4, never growing to
+5, exactly as designed.
 
 ## Stage 6 — Test harness (`src/evaluate.py`, part 1)
 
