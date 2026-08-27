@@ -57,15 +57,26 @@ def format_context(retrieved_chunks) -> str:
     return "\n\n".join(blocks)
 
 
-def call_llama(messages) -> str:
-    """Send a messages list to llama3.2 via Ollama's /api/chat and return the reply text."""
-    response = requests.post(
-        f"{OLLAMA_BASE_URL}/api/chat",
-        json={"model": CHAT_MODEL, "messages": messages, "stream": False},
-        timeout=180,
-    )
-    response.raise_for_status()
-    return response.json()["message"]["content"]
+def call_llama(messages, timeout: int = 300, max_retries: int = 2) -> str:
+    """Send a messages list to llama3.2 via Ollama's /api/chat and return the reply text.
+
+    Retries once on a read timeout -- later turns carry a larger prompt (full
+    memory history + retrieved context), which can occasionally exceed a
+    single attempt's timeout on a slow/loaded local machine.
+    """
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = requests.post(
+                f"{OLLAMA_BASE_URL}/api/chat",
+                json={"model": CHAT_MODEL, "messages": messages, "stream": False},
+                timeout=timeout,
+            )
+            response.raise_for_status()
+            return response.json()["message"]["content"]
+        except requests.exceptions.ReadTimeout:
+            if attempt == max_retries:
+                raise
+            print(f"  call_llama timed out (attempt {attempt}/{max_retries}) -- retrying")
 
 
 class ChatSession:

@@ -1,8 +1,61 @@
-# Python Glossary — RAG Assignment
+# Python Knowledgebase — RAG Assignment
 
 A running reference of every Python term/function/concept used in this project so far,
 explained simply, with the closest C#/.NET comparison and a concrete example. Updated as new
 concepts appear.
+
+---
+
+## Installing Python — Windows vs WSL2, and why this project uses WSL2
+
+**Windows (a typical .NET dev machine)** — two common routes:
+- **python.org installer (recommended)** — download from python.org, run it, and make sure to
+  tick **"Add python.exe to PATH"** during setup. After this, `python --version` works directly
+  in PowerShell/cmd.
+- **winget** — `winget install Python.Python.3.12`
+- **Avoid the Microsoft Store version for dev work** — Windows ships a fake `python.exe`
+  "app execution alias" that, if nothing else is installed, prints *"Python was not found; run
+  without arguments to install from the Microsoft Store"* — this is exactly the error hit
+  earlier in this project when a command tried to run `python` from a plain Windows shell with
+  no real interpreter installed there. It's a placeholder, not a real Python install.
+
+**WSL2 (Ubuntu)** — what this project actually runs on:
+```bash
+sudo apt update
+sudo apt install python3 python3-venv python3-pip
+```
+Ubuntu images typically ship `python3` already; `python3-venv` (for creating virtual
+environments) and `python3-pip` sometimes need installing separately.
+
+**Why this project specifically uses WSL2** rather than Windows-native Python: the project's
+`.venv` was created inside WSL (its folder layout — `.venv/lib/python3.12/site-packages/...` —
+is the Linux venv shape, not Windows' `.venv\Scripts\...`), so Ollama, FAISS, and every script
+here run through a real Linux environment rather than Windows — smoother native package
+compatibility, and matches how Ollama itself is typically run for local dev.
+
+**Why `python` works on Windows but only `python3` exists by default on Ubuntu** — this isn't
+a project-specific quirk, it's standard behavior on Debian/Ubuntu-family Linux distros: they
+deliberately ship only a `python3` command system-wide, to avoid ambiguity with the old Python 2
+`python` command from years ago. A package called `python-is-python3` exists to add the `python`
+alias system-wide, but isn't installed by default. Windows' installer, by contrast, has always
+just created a plain `python` command.
+
+**Why `python` *does* work once inside an activated `.venv`, on either OS** — when you create a
+venv with `python3 -m venv .venv`, Python's own `venv` module always creates **both** `python`
+and `python3` inside `.venv/bin/` (or `.venv\Scripts\` on Windows), regardless of what the base
+system provides. Then:
+```bash
+source .venv/bin/activate      # WSL/Linux/macOS
+.venv\Scripts\activate         # Windows
+```
+doesn't install anything new — it just **temporarily prepends the venv's own bin/Scripts folder
+to your shell's `PATH`** environment variable for that session. Since your shell searches `PATH`
+folders in order, `python` now resolves to the venv's copy before it ever reaches the system
+folders. Run `deactivate`, and `PATH` reverts, so `python` goes back to whatever (or nothing) the
+base OS provides on its own.
+*C# equivalent:* similar in spirit to how `dotnet` resolves which SDK to use based on `PATH`/
+`global.json` — the venv is just temporarily reordering the search path, not installing anything
+permanent.
 
 ---
 
@@ -804,6 +857,54 @@ string question = Console.ReadLine().Trim();
 **`while True: ... if condition: break`** — an infinite loop that only stops when `break`
 runs, used here to keep the chat session going until the user types "quit".
 *C# equivalent:* `while (true) { ... if (condition) break; }` — identical concept and keyword.
+
+---
+
+## RAGAS / LangChain / HuggingFace `datasets` basics (evaluate.py)
+
+**Building a "columnar" dict before creating a `Dataset`** — instead of one list of row-objects,
+RAGAS/HuggingFace's `Dataset` wants one list *per column*, all the same length/order:
+```python
+data = {"question": [], "answer": [], "contexts": []}
+for item in questions:
+    data["question"].append(item["question"])
+    data["answer"].append(answer)
+```
+*C# equivalent:* closer to building 3 parallel `List<T>` fields than to building a
+`List<RowObject>` — you're constructing columns, not rows, even though the loop still runs once
+per row.
+
+**`Dataset.from_dict(data)`** — converts that dict-of-lists into a HuggingFace `Dataset` object
+(a table-like structure), the input format RAGAS's `evaluate()` requires.
+*C# equivalent:* closest is building a `DataTable` from parallel arrays.
+```python
+from datasets import Dataset
+dataset = Dataset.from_dict(data)
+```
+
+**Wrapping one object inside another's constructor** (`LangchainLLMWrapper(ChatOllama(...))`)
+— `ChatOllama(...)` is created first (Ollama-specific implementation of LangChain's generic chat
+interface), then immediately passed into `LangchainLLMWrapper(...)` (which adapts a LangChain
+object to RAGAS's own internal interface). Two layers of adapter, one nested constructor call.
+*C# equivalent:* similar to `new RagasLlmAdapter(new OllamaChatClient(...))` — an adapter
+wrapping an adapter, each satisfying a different interface the next layer expects.
+```python
+llm = LangchainLLMWrapper(ChatOllama(model="llama3.2"))
+```
+```csharp
+var llm = new RagasLlmAdapter(new OllamaChatClient("llama3.2"));
+```
+
+**Constructing an object with only keyword arguments** (`AspectCritic(name=..., definition=...)`)
+— Python lets you (and this library requires you to) pass constructor arguments strictly by
+name, in any order, rather than positionally.
+*C# equivalent:* using named arguments explicitly, e.g. `new AspectCritic(name: "...", definition: "...")`.
+```python
+contextual_awareness = AspectCritic(
+    name="contextual_awareness",
+    definition="Does the answer correctly use prior conversation turns...",
+)
+```
 
 ---
 

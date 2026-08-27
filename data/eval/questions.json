@@ -1,0 +1,42 @@
+[
+  {
+    "question": "What is the 'text-to-text' framework introduced in the T5 paper, and why was it proposed?",
+    "doc_focus": "T5"
+  },
+  {
+    "question": "What pretraining objective does it use, and how is that different from a standard language modeling objective?",
+    "doc_focus": "T5"
+  },
+  {
+    "question": "What problem with recurrent (RNN/LSTM) models motivated the Transformer architecture in 'Attention Is All You Need'?",
+    "doc_focus": "Transformer"
+  },
+  {
+    "question": "How many attention heads does the base version of that model use?",
+    "doc_focus": "Transformer"
+  },
+  {
+    "question": "What is BERT's masked language modeling (MLM) pretraining objective, and how does it enable bidirectional context?",
+    "doc_focus": "BERT"
+  },
+  {
+    "question": "How does RoBERTa's pretraining procedure differ from the original BERT's?",
+    "doc_focus": "RoBERTa"
+  },
+  {
+    "question": "What is GPT-3's approach to few-shot learning via in-context examples, without gradient updates?",
+    "doc_focus": "GPT-3"
+  },
+  {
+    "question": "How is that different from traditional fine-tuning approaches?",
+    "doc_focus": "GPT-3"
+  },
+  {
+    "question": "What are the main components of the Transformer's encoder and decoder stacks?",
+    "doc_focus": "Transformer"
+  },
+  {
+    "question": "Earlier we discussed T5's text-to-text framework -- what benchmark tasks or datasets was it evaluated on?",
+    "doc_focus": "T5"
+  }
+]
