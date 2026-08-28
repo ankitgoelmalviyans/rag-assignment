@@ -860,50 +860,82 @@ runs, used here to keep the chat session going until the user types "quit".
 
 ---
 
-## RAGAS / LangChain / HuggingFace `datasets` basics (evaluate.py)
+## LangChain patterns (`UseLangchain` branch — langchain_service.py)
 
-**Building a "columnar" dict before creating a `Dataset`** — instead of one list of row-objects,
-RAGAS/HuggingFace's `Dataset` wants one list *per column*, all the same length/order:
+**Constructing an object with only keyword arguments** — Python lets you (and these libraries
+often require you to) pass constructor arguments strictly by name, in any order, rather than
+positionally.
+*C# equivalent:* using named arguments explicitly, e.g. `new ChatOllama(model: "...", temperature: 0)`.
 ```python
-data = {"question": [], "answer": [], "contexts": []}
-for item in questions:
-    data["question"].append(item["question"])
-    data["answer"].append(answer)
-```
-*C# equivalent:* closer to building 3 parallel `List<T>` fields than to building a
-`List<RowObject>` — you're constructing columns, not rows, even though the loop still runs once
-per row.
-
-**`Dataset.from_dict(data)`** — converts that dict-of-lists into a HuggingFace `Dataset` object
-(a table-like structure), the input format RAGAS's `evaluate()` requires.
-*C# equivalent:* closest is building a `DataTable` from parallel arrays.
-```python
-from datasets import Dataset
-dataset = Dataset.from_dict(data)
+llm = ChatOllama(model="llama3.2", temperature=0.0, num_ctx=8192)
 ```
 
-**Wrapping one object inside another's constructor** (`LangchainLLMWrapper(ChatOllama(...))`)
-— `ChatOllama(...)` is created first (Ollama-specific implementation of LangChain's generic chat
-interface), then immediately passed into `LangchainLLMWrapper(...)` (which adapts a LangChain
-object to RAGAS's own internal interface). Two layers of adapter, one nested constructor call.
-*C# equivalent:* similar to `new RagasLlmAdapter(new OllamaChatClient(...))` — an adapter
-wrapping an adapter, each satisfying a different interface the next layer expects.
+**`**kwargs` — unpacking a dict into keyword arguments.** Build the arguments as a dict first
+(so you can conditionally add to it), then splat it into the constructor with `**`.
+*C# equivalent:* no direct match — closest is building an options/config object and passing it,
+since C# can't expand a dictionary into named parameters at a call site.
 ```python
-llm = LangchainLLMWrapper(ChatOllama(model="llama3.2"))
+kwargs = {"model": CHAT_MODEL, "temperature": temperature}
+if json_mode:
+    kwargs["format"] = "json"      # conditionally add an argument
+llm = ChatOllama(**kwargs)          # ** expands the dict into named arguments
+```
+
+**A module-level cache + the `global` keyword.** Variables assigned inside a function are local
+by default; `global` says "assign to the module-level one instead." Used here so an expensive
+object is built once and reused.
+*C# equivalent:* a `static` field with lazy initialization, or `Lazy<T>`.
+```python
+_EMBEDDINGS = None
+
+def get_embeddings():
+    global _EMBEDDINGS               # without this, the assignment below
+    if _EMBEDDINGS is None:          # would create a new *local* variable
+        _EMBEDDINGS = OllamaEmbeddings(model=EMBED_MODEL)
+    return _EMBEDDINGS
 ```
 ```csharp
-var llm = new RagasLlmAdapter(new OllamaChatClient("llama3.2"));
+private static OllamaEmbeddings _embeddings;
+public static OllamaEmbeddings GetEmbeddings() =>
+    _embeddings ??= new OllamaEmbeddings(EmbedModel);
 ```
 
-**Constructing an object with only keyword arguments** (`AspectCritic(name=..., definition=...)`)
-— Python lets you (and this library requires you to) pass constructor arguments strictly by
-name, in any order, rather than positionally.
-*C# equivalent:* using named arguments explicitly, e.g. `new AspectCritic(name: "...", definition: "...")`.
+**Using a tuple as a dictionary key** — Python tuples are hashable, so a combination of values
+can key a cache directly, no composite-key class needed.
+*C# equivalent:* `Dictionary<(double, bool), ChatOllama>` — C# value tuples work the same way.
 ```python
-contextual_awareness = AspectCritic(
-    name="contextual_awareness",
-    definition="Does the answer correctly use prior conversation turns...",
-)
+_LLM_CACHE = {}
+key = (temperature, json_mode)       # a 2-value tuple as the key
+if key not in _LLM_CACHE:
+    _LLM_CACHE[key] = ChatOllama(...)
+```
+
+**Operator overloading — the `|` in LangChain (LCEL).** `|` is normally bitwise-OR, but Python
+lets a class redefine what operators mean for it. LangChain uses this to compose steps into a
+pipeline, left to right.
+*C# equivalent:* C# also supports operator overloading (`public static X operator |(...)`),
+though chaining pipelines this way is far less common than LINQ-style method chaining.
+```python
+chain = prompt | llm | StrOutputParser()   # output of each step feeds the next
+answer = chain.invoke({"question": "...", "context": "..."})
+```
+
+**Union type hints with `|`** (`OllamaEmbeddings | None`) — declares a value that may be either
+that type or `None`. Same `|` symbol, unrelated to the operator overloading above.
+*C# equivalent:* a nullable reference type, `OllamaEmbeddings?`.
+```python
+_EMBEDDINGS: OllamaEmbeddings | None = None
+```
+
+**List slicing to split a batch** — `list[:n]` takes the first n items, `list[n:]` takes
+everything after them. Neither modifies the original.
+*C# equivalent:* `list.Take(n)` and `list.Skip(n)`.
+```python
+first, rest = documents[:batch_size], documents[batch_size:]
+```
+```csharp
+var first = documents.Take(batchSize).ToList();
+var rest  = documents.Skip(batchSize).ToList();
 ```
 
 ---

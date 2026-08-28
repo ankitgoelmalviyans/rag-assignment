@@ -1,109 +1,50 @@
 """
-Embedding + FAISS vector store stage of the RAG pipeline.
+Embedding + FAISS vector store stage of the RAG pipeline (LangChain branch).
 
-Turns every chunk in chunks.json into a vector via Ollama's nomic-embed-text
-model, and builds a FAISS index over those vectors for fast similarity
-search. embed_texts() is also reused later by bot.py to embed a user's
-question the same way, before searching this index.
+Builds a LangChain FAISS store over the chunk Documents produced by
+chunking.py and persists it to VECTORSTORE_DIR.
 
-FAISS row i always corresponds to chunks[i] in chunks.json -- that
-positional link is how a search result (a row number) gets mapped back
-to the actual chunk text/metadata. There is no separate metadata file;
-chunks.json IS the metadata sidecar.
+The biggest structural change from the hand-written implementation on `main`:
+that version maintained TWO artifacts -- faiss.index (vectors) and
+chunks.json (text/metadata) -- linked only by matching row position, an
+invariant the code had to protect by hand. LangChain's FAISS object owns the
+index and the docstore together, so a search returns Documents carrying their
+own text and metadata. There is no positional link left to break.
+
+Embedding batching and retry, previously hand-written here, are handled
+inside OllamaEmbeddings.
 """
 
-import json
-import time
-
-import faiss
-import numpy as np
-import requests
-
-from config import (
-    CHUNKS_FILE,
-    EMBED_MODEL,
-    EMBEDDINGS_FILE,
-    INDEX_FILE,
-    OLLAMA_BASE_URL,
-    PROCESSED_DIR,
+from config import VECTORSTORE_DIR
+from chunking import build_all_chunks
+from langchain_service import (
+    build_vectorstore,
+    load_vectorstore,
+    save_vectorstore,
+    search_with_scores,
 )
 
-BATCH_SIZE = 32
-MAX_RETRIES = 3
-
-
-def normalize(vectors: np.ndarray) -> np.ndarray:
-    """Scale each vector to unit length, so FAISS inner product == cosine similarity."""
-    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
-    return vectors / norms
-
-
-def embed_texts(texts: list[str], model: str = EMBED_MODEL, batch_size: int = BATCH_SIZE) -> np.ndarray:
-    """
-    Turn a list of strings into a 2D array of normalized embedding vectors,
-    one row per input text, in the same order. Calls Ollama's /api/embed in
-    batches to keep the number of HTTP requests small, retrying each batch
-    a few times before giving up.
-    """
-    all_vectors = []
-
-    for start in range(0, len(texts), batch_size):
-        batch = texts[start:start + batch_size]
-        batch_vectors = None
-
-        for attempt in range(1, MAX_RETRIES + 1):
-            try:
-                response = requests.post(
-                    f"{OLLAMA_BASE_URL}/api/embed",
-                    json={"model": model, "input": batch},
-                    timeout=120,
-                )
-                response.raise_for_status()
-                batch_vectors = response.json()["embeddings"]
-                break
-            except requests.exceptions.RequestException as error:
-                if attempt == MAX_RETRIES:
-                    raise
-                print(f"  embed batch failed (attempt {attempt}/{MAX_RETRIES}): {error} -- retrying")
-                time.sleep(2 ** attempt)
-
-        all_vectors.extend(batch_vectors)
-
-    vectors = np.array(all_vectors, dtype="float32")
-    return normalize(vectors)
-
-
 if __name__ == "__main__":
-    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+    chunks = build_all_chunks()
+    print(f"Built {len(chunks)} chunks from the source PDFs")
 
-    with open(CHUNKS_FILE, "r", encoding="utf-8") as f:
-        chunks = json.load(f)
-    print(f"Loaded {len(chunks)} chunks from {CHUNKS_FILE}")
+    print("Embedding chunks via Ollama (nomic-embed-text)...")
+    store = build_vectorstore(chunks)
 
-    texts = [chunk["text"] for chunk in chunks]
-    embeddings = embed_texts(texts)
-    print(f"Computed embeddings: shape = {embeddings.shape}")
-
-    np.save(EMBEDDINGS_FILE, embeddings)
-    print(f"Saved embeddings to {EMBEDDINGS_FILE}")
-
-    dimension = embeddings.shape[1]
-    index = faiss.IndexFlatIP(dimension)
-    index.add(embeddings)
-    faiss.write_index(index, str(INDEX_FILE))
-    print(f"Saved FAISS index ({index.ntotal} vectors, dimension {dimension}) to {INDEX_FILE}")
+    save_vectorstore(store, VECTORSTORE_DIR)
+    print(f"Saved FAISS store ({store.index.ntotal} vectors, "
+          f"dimension {store.index.d}) to {VECTORSTORE_DIR}")
 
     # --- sanity checks ---
-    reloaded_index = faiss.read_index(str(INDEX_FILE))
-    assert reloaded_index.ntotal == len(chunks), "index size doesn't match chunk count!"
-    print(f"Reload check passed: {reloaded_index.ntotal} vectors match {len(chunks)} chunks")
+    reloaded = load_vectorstore(VECTORSTORE_DIR)
+    assert reloaded.index.ntotal == len(chunks), "reloaded store size doesn't match chunk count!"
+    print(f"Reload check passed: {reloaded.index.ntotal} vectors match {len(chunks)} chunks")
 
     sample_query = "self-attention mechanism formula"
-    query_vector = embed_texts([sample_query])
-    scores, row_indices = reloaded_index.search(query_vector, k=3)
+    results = search_with_scores(reloaded, sample_query, k=3)
 
     print(f"\nSample query: {sample_query!r}")
-    for score, row in zip(scores[0], row_indices[0]):
-        chunk = chunks[row]
-        preview = chunk["text"][:100].replace("\n", " ")
-        print(f"  score={score:.3f} | {chunk['doc_id']} p.{chunk['page_start']}-{chunk['page_end']} | {preview}...")
+    for document, score in results:
+        preview = document.page_content[:100].replace("\n", " ")
+        print(f"  score={score:.3f} | {document.metadata.get('doc_id')} "
+              f"p.{document.metadata.get('page')} | {preview}...")

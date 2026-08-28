@@ -1,30 +1,29 @@
 """
-PDF ingestion and cleaning stage of the RAG pipeline.
+PDF ingestion and cleaning stage of the RAG pipeline (LangChain branch).
 
-Reads every PDF in PDF_FOLDER, extracts text per page, and removes
-structural extraction noise (repeated headers/footers, standalone page
-numbers, excess blank lines) before the text is handed off to the
-chunking stage. Noise is detected structurally (by repetition/pattern),
-not by filtering on word content, so this works across any PDF.
+Loads every PDF in PDF_FOLDER as LangChain Documents (one per page) via
+langchain_service, then removes structural extraction noise -- repeated
+headers/footers, standalone page numbers, excess blank lines -- before the
+text is handed off to the chunking stage.
+
+Division of labour worth noting: LangChain's PyPDFLoader replaces the raw
+pypdf page-reading loop, but LangChain ships no equivalent for the
+noise-cleaning below. Detecting a running header by how often a line repeats
+across a document is bespoke logic, so it stays hand-written here and simply
+operates on Document.page_content instead of plain strings.
 """
 
 import re
 from collections import Counter
-from pathlib import Path
 
-from pypdf import PdfReader
+from langchain_core.documents import Document
 
 from config import PDF_FOLDER
+from langchain_service import load_pdf_pages
 
 # a repeated line must show up on at least this fraction of pages
 # to be treated as a header/footer
 HEADER_FOOTER_THRESHOLD = 0.6
-
-
-def extract_pages(pdf_path: Path) -> list[str]:
-    """Read a PDF and return a list of raw text, one entry per page."""
-    reader = PdfReader(pdf_path)
-    return [page.extract_text() or "" for page in reader.pages]
 
 
 def find_repeated_lines(pages_lines: list[list[str]], threshold: float = HEADER_FOOTER_THRESHOLD) -> set[str]:
@@ -58,25 +57,26 @@ def find_repeated_lines(pages_lines: list[list[str]], threshold: float = HEADER_
     }
 
 
-def clean_pages(pages_text: list[str]) -> tuple[list[str], set[str]]:
+def clean_documents(pages: list[Document]) -> tuple[list[Document], set[str]]:
     """
-    Remove structural PDF noise (repeated headers/footers, standalone
-    page numbers, excess blank lines) from a list of per-page text.
+    Remove structural PDF noise from a document's page-level Documents.
 
     Args:
-        pages_text: raw extracted text, one entry per page, in page order.
+        pages: LangChain Documents, one per page, in page order, all from
+            the same PDF.
 
     Returns:
         A tuple of (cleaned_pages, repeated_lines):
-        - cleaned_pages: same length/order as pages_text, with noise removed.
+        - cleaned_pages: new Documents with noise stripped from page_content,
+          metadata carried through unchanged.
         - repeated_lines: the header/footer lines that were stripped out,
           returned for visibility/debugging.
     """
-    pages_lines = [page.split("\n") for page in pages_text]
+    pages_lines = [page.page_content.split("\n") for page in pages]
     repeated_lines = find_repeated_lines(pages_lines)
 
     cleaned_pages = []
-    for lines in pages_lines:
+    for page, lines in zip(pages, pages_lines):
         kept_lines = []
         for line in lines:
             stripped = line.strip()
@@ -91,21 +91,27 @@ def clean_pages(pages_text: list[str]) -> tuple[list[str], set[str]]:
 
         page_clean = "\n".join(kept_lines)
         page_clean = re.sub(r"\n{3,}", "\n\n", page_clean)  # collapse blank-line runs
-        cleaned_pages.append(page_clean)
+
+        cleaned_pages.append(Document(page_content=page_clean, metadata=dict(page.metadata)))
 
     return cleaned_pages, repeated_lines
 
 
-if __name__ == "__main__":
-    for pdf_file in PDF_FOLDER.glob("*.pdf"):
-        pages_text = extract_pages(pdf_file)
-        cleaned_pages, repeated_lines = clean_pages(pages_text)
+def load_and_clean(pdf_path) -> tuple[list[Document], set[str]]:
+    """Load one PDF and clean it in a single call -- what chunking.py uses."""
+    return clean_documents(load_pdf_pages(pdf_path))
 
-        original_chars = sum(len(p) for p in pages_text)
-        cleaned_chars = sum(len(p) for p in cleaned_pages)
+
+if __name__ == "__main__":
+    for pdf_file in sorted(PDF_FOLDER.glob("*.pdf")):
+        pages = load_pdf_pages(pdf_file)
+        cleaned_pages, repeated_lines = clean_documents(pages)
+
+        original_chars = sum(len(p.page_content) for p in pages)
+        cleaned_chars = sum(len(p.page_content) for p in cleaned_pages)
 
         print(f"File: {pdf_file.name}")
-        print(f"Pages: {len(pages_text)}")
+        print(f"Pages: {len(pages)}")
         print(f"Characters before cleaning: {original_chars}")
         print(f"Characters after cleaning:  {cleaned_chars}")
         print(f"Removed as header/footer noise ({len(repeated_lines)} distinct lines):")

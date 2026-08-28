@@ -1,122 +1,99 @@
 """
-Retrieval + conversational chat stage of the RAG pipeline.
+Retrieval + conversational chat stage of the RAG pipeline (LangChain branch).
 
 Combines FAISS-retrieved chunks with the last MEMORY_TURNS turns of
 conversation memory into a prompt sent to llama3.2, and returns the
-generated answer. ChatSession owns the memory; everything else here is
-a stateless helper function.
+generated answer. ChatSession owns the memory; everything else here is a
+thin wrapper over langchain_service.
+
+What LangChain replaced compared to `main`:
+  - the manual embed -> index.search -> map-row-number-back-to-chunk dance is
+    now one similarity_search_with_score() call returning Documents that
+    carry their own text and metadata
+  - the hand-built messages list is now a ChatPromptTemplate with a
+    MessagesPlaceholder for history
+  - the raw requests.post + retry loop is now the ChatOllama client
+
+What stayed the same on purpose: the memory window is still a
+collections.deque(maxlen=4). LangChain's memory abstractions add indirection
+without changing behaviour here, and the assignment asks specifically for the
+last 4 interactions -- a bounded deque states that directly.
 """
 
-import json
 from collections import deque
 
-import faiss
-import requests
-
-from config import CHAT_MODEL, CHUNKS_FILE, INDEX_FILE, OLLAMA_BASE_URL
-from vectorstore import embed_texts
-
-TOP_K = 5
-MEMORY_TURNS = 4
-
-SYSTEM_PROMPT = (
-    "You are a helpful assistant answering questions about a set of research papers "
-    "(Transformer, BERT, GPT-3, RoBERTa, T5). Answer ONLY using the provided context. "
-    "If the context doesn't contain enough information to answer, say so explicitly "
-    "instead of guessing. When possible, cite the source as [doc_id, page X]."
+from config import MEMORY_TURNS, TOP_K, VECTORSTORE_DIR
+from langchain_service import (
+    build_answer_chain,
+    format_context,
+    load_vectorstore,
+    search_with_scores,
+    to_history_messages,
 )
 
 
-def load_chunks_and_index():
-    """Load the chunk metadata and FAISS index built by vectorstore.py."""
-    with open(CHUNKS_FILE, "r", encoding="utf-8") as f:
-        chunks = json.load(f)
-    index = faiss.read_index(str(INDEX_FILE))
-    return chunks, index
+def load_store():
+    """Load the FAISS store built by vectorstore.py."""
+    return load_vectorstore(VECTORSTORE_DIR)
 
 
-def retrieve(query: str, chunks, index, k: int = TOP_K):
-    """Embed a query and return the top-k most similar chunks with their scores."""
-    query_vector = embed_texts([query])
-    scores, row_indices = index.search(query_vector, k)
-
-    results = []
-    for score, row in zip(scores[0], row_indices[0]):
-        chunk_with_score = dict(chunks[row])
-        chunk_with_score["score"] = float(score)
-        results.append(chunk_with_score)
-    return results
-
-
-def format_context(retrieved_chunks) -> str:
-    """Turn retrieved chunks into a labeled context block for the prompt."""
-    blocks = []
-    for chunk in retrieved_chunks:
-        label = f"[Source: {chunk['doc_id']}, page {chunk['page_start']}]"
-        blocks.append(f"{label}\n{chunk['text']}")
-    return "\n\n".join(blocks)
-
-
-def call_llama(messages, timeout: int = 300, max_retries: int = 2) -> str:
-    """Send a messages list to llama3.2 via Ollama's /api/chat and return the reply text.
-
-    Retries once on a read timeout -- later turns carry a larger prompt (full
-    memory history + retrieved context), which can occasionally exceed a
-    single attempt's timeout on a slow/loaded local machine.
+def retrieve(query: str, store, k: int = TOP_K):
     """
-    for attempt in range(1, max_retries + 1):
-        try:
-            response = requests.post(
-                f"{OLLAMA_BASE_URL}/api/chat",
-                json={"model": CHAT_MODEL, "messages": messages, "stream": False},
-                timeout=timeout,
-            )
-            response.raise_for_status()
-            return response.json()["message"]["content"]
-        except requests.exceptions.ReadTimeout:
-            if attempt == max_retries:
-                raise
-            print(f"  call_llama timed out (attempt {attempt}/{max_retries}) -- retrying")
+    Return the top-k most similar chunks as (Document, score) pairs.
+
+    Always returns exactly k results -- there is no relevance threshold, so a
+    weak match is still passed to the LLM. Kept as-is to match `main`.
+    """
+    return search_with_scores(store, query, k=k)
+
+
+def retrieved_to_records(scored_documents) -> list[dict]:
+    """Flatten (Document, score) pairs into plain dicts for results.json."""
+    return [
+        {
+            "chunk_id": document.metadata.get("chunk_id"),
+            "doc_id": document.metadata.get("doc_id"),
+            "page": document.metadata.get("page"),
+            "score": round(float(score), 4),
+            "text": document.page_content,
+        }
+        for document, score in scored_documents
+    ]
 
 
 class ChatSession:
     """
     Holds one conversation's memory: the last MEMORY_TURNS (question, answer)
     pairs. Each ask() call retrieves fresh context for the new question,
-    builds a prompt including prior turns, sends it to llama3.2, then
-    appends the new turn to memory -- automatically dropping the oldest
-    turn once more than MEMORY_TURNS have accumulated.
+    builds a prompt including prior turns, sends it to llama3.2, then appends
+    the new turn to memory -- automatically dropping the oldest turn once more
+    than MEMORY_TURNS have accumulated.
     """
 
-    def __init__(self, chunks, index):
-        self.chunks = chunks
-        self.index = index
+    def __init__(self, store, temperature: float = 0.0):
+        self.store = store
         self.history = deque(maxlen=MEMORY_TURNS)
+        self.chain = build_answer_chain(temperature=temperature)
 
     def ask(self, question: str) -> str:
-        retrieved = retrieve(question, self.chunks, self.index)
+        retrieved = retrieve(question, self.store)
         context = format_context(retrieved)
 
         print(f"[memory: {len(self.history)} turn(s) currently held]")
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-        for turn in self.history:
-            messages.append({"role": "user", "content": turn["question"]})
-            messages.append({"role": "assistant", "content": turn["answer"]})
-
-        messages.append({
-            "role": "user",
-            "content": f"Context:\n{context}\n\nQuestion: {question}",
+        answer = self.chain.invoke({
+            "context": context,
+            "question": question,
+            "history": to_history_messages(self.history),
         })
 
-        answer = call_llama(messages)
         self.history.append({"question": question, "answer": answer})
         return answer
 
 
 if __name__ == "__main__":
-    chunks, index = load_chunks_and_index()
-    session = ChatSession(chunks, index)
+    store = load_store()
+    session = ChatSession(store)
 
     print("RAG chat ready. Type a question (or 'quit' to exit).\n")
     while True:
