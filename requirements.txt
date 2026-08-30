@@ -1,0 +1,25 @@
+# Python dependencies for the RAG pipeline.
+#
+# Install into a virtual environment from the project root:
+#
+#     python3 -m venv .venv
+#     source .venv/bin/activate        # Windows: .venv\Scripts\activate
+#     pip install -r requirements.txt
+#
+# These four are the entire dependency list -- there is no RAG framework
+# (no LangChain, no LlamaIndex). Everything else the project uses (json, re,
+# collections, pathlib, time) is Python's standard library.
+#
+# The models themselves are NOT installed by pip. They are served locally by
+# Ollama, which is installed separately (https://ollama.ai) and then given
+# the two models this project uses:
+#
+#     ollama pull nomic-embed-text     # embeddings, used for retrieval
+#     ollama pull llama3.2             # chat model, writes the answers
+#
+# Versions are pinned to what this project was developed and tested against.
+
+pypdf==6.16.1        # PDF text extraction (ingestion.py)
+faiss-cpu==1.15.0    # vector index for similarity search (vectorstore.py, bot.py)
+numpy==1.26.4        # array maths for the embedding vectors (vectorstore.py)
+requests==2.34.2     # HTTP calls to the local Ollama server (vectorstore.py, bot.py)

@@ -3,26 +3,47 @@ Shared constants for the RAG pipeline: file paths and Ollama settings.
 
 Kept in one place so every stage (ingestion, chunking, embeddings,
 vector store, bot, evaluation) references the same values instead of
-each duplicating its own copy.
+each duplicating its own copy. Change a path or a model name here and
+every file picks it up -- the classic bug this avoids is updating a value
+in one file and forgetting the other four.
+
+Roughly the role of appsettings.json in a .NET project, except it is real
+Python code, so other files just import these names directly.
 """
 
-from pathlib import Path
+from pathlib import Path      # Path objects handle / vs \ across OSes
 
 # --- Data locations ---
+#
+# IMPORTANT: these are RELATIVE paths. They are resolved against whatever
+# folder you are standing in when you run a script -- NOT against where this
+# file lives. That is why every command must be run from the project root:
+#
+#     python src/bot.py          works    ("data/pdfs" exists from here)
+#     cd src && python bot.py    breaks   (no "data/pdfs" inside src/)
 PDF_FOLDER = Path("data/pdfs")
 PROCESSED_DIR = Path("data/processed")
-CHUNKS_FILE = PROCESSED_DIR / "chunks.json"
-EMBEDDINGS_FILE = PROCESSED_DIR / "embeddings.npy"
-INDEX_FILE = PROCESSED_DIR / "faiss.index"
+
+# Path supports / as a join operator, so this reads naturally and stays
+# correct on any OS. Equivalent to Path.Combine() in .NET.
+CHUNKS_FILE = PROCESSED_DIR / "chunks.json"        # chunk text + metadata
+EMBEDDINGS_FILE = PROCESSED_DIR / "embeddings.npy" # raw vectors (debug only)
+INDEX_FILE = PROCESSED_DIR / "faiss.index"         # the searchable index
 
 EVAL_DIR = Path("data/eval")
-QUESTIONS_FILE = EVAL_DIR / "questions.json"
-RESULTS_FILE = EVAL_DIR / "results.json"
+QUESTIONS_FILE = EVAL_DIR / "questions.json"       # the 10 test questions
+RESULTS_FILE = EVAL_DIR / "results.json"           # written by evaluate.py
 
 # --- Ollama settings ---
+#
+# Ollama runs a small web server on your machine that hosts the models. It is
+# not a cloud service and needs no API key -- "calling the LLM" throughout
+# this project just means an HTTP request to this address.
 OLLAMA_BASE_URL = "http://localhost:11434"
-EMBED_MODEL = "nomic-embed-text"
-CHAT_MODEL = "llama3.2"
+
+# TWO models, doing two completely different jobs:
+EMBED_MODEL = "nomic-embed-text"   # text -> 768 numbers, so text can be FOUND
+CHAT_MODEL = "llama3.2"            # reads text and WRITES the answer
 
 # Context window, in tokens, requested on every chat call.
 #

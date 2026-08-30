@@ -1,0 +1,736 @@
+<title>RAG Assignment Report</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --ink: #1a1a1a;
+    --muted: #555555;
+    --rule: #c8c8c8;
+    --rule-light: #e4e4e4;
+    --code-bg: #f4f4f4;
+    --font-body: Georgia, "Times New Roman", Times, serif;
+    --font-mono: Consolas, "Courier New", monospace;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--font-body);
+    font-size: 16px;
+    line-height: 1.65;
+    margin: 0;
+    padding: 3rem 1.5rem 6rem;
+  }
+
+  .page {
+    max-width: 40em;
+    margin: 0 auto;
+  }
+
+  /* --- title block --- */
+  .title-block {
+    border-bottom: 2px solid var(--ink);
+    padding-bottom: 1.25rem;
+    margin-bottom: 2rem;
+  }
+  h1 {
+    font-size: 1.75rem;
+    line-height: 1.25;
+    margin: 0 0 0.5rem;
+    text-wrap: balance;
+  }
+  .subtitle {
+    color: var(--muted);
+    font-size: 1rem;
+    margin: 0 0 1rem;
+  }
+  .meta {
+    font-size: 0.9rem;
+    color: var(--muted);
+    margin: 0;
+  }
+  .meta div { margin-bottom: 0.15rem; }
+
+  /* --- headings --- */
+  h2 {
+    font-size: 1.3rem;
+    margin: 2.5rem 0 0.75rem;
+    padding-bottom: 0.3rem;
+    border-bottom: 1px solid var(--rule);
+    text-wrap: balance;
+  }
+  h3 {
+    font-size: 1.05rem;
+    margin: 1.75rem 0 0.5rem;
+    text-wrap: balance;
+  }
+
+  p { margin: 0 0 0.9rem; }
+
+  ul, ol { margin: 0 0 1rem; padding-left: 1.5em; }
+  li { margin-bottom: 0.4rem; }
+
+  code {
+    font-family: var(--font-mono);
+    font-size: 0.87em;
+    background: var(--code-bg);
+    padding: 0.1em 0.3em;
+  }
+
+  pre {
+    font-family: var(--font-mono);
+    font-size: 0.82rem;
+    line-height: 1.5;
+    background: var(--code-bg);
+    border: 1px solid var(--rule-light);
+    padding: 0.9rem 1rem;
+    overflow-x: auto;
+    margin: 0 0 1rem;
+  }
+
+  /* --- tables --- */
+  .table-wrap { overflow-x: auto; margin: 0 0 1.2rem; }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 0.92rem;
+  }
+  caption {
+    caption-side: top;
+    text-align: left;
+    font-size: 0.88rem;
+    color: var(--muted);
+    padding-bottom: 0.4rem;
+  }
+  th, td {
+    border: 1px solid var(--rule);
+    padding: 0.45rem 0.6rem;
+    text-align: left;
+    vertical-align: top;
+  }
+  th {
+    background: var(--code-bg);
+    font-weight: bold;
+  }
+  td.num, th.num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  blockquote {
+    margin: 0 0 1rem;
+    padding: 0.6rem 0 0.6rem 1rem;
+    border-left: 3px solid var(--rule);
+    color: var(--muted);
+  }
+  blockquote p:last-child { margin-bottom: 0; }
+
+  .figure {
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    line-height: 1.5;
+    background: var(--code-bg);
+    border: 1px solid var(--rule-light);
+    padding: 1rem;
+    overflow-x: auto;
+    white-space: pre;
+    margin: 0 0 0.4rem;
+  }
+  .caption {
+    font-size: 0.85rem;
+    color: var(--muted);
+    margin: 0 0 1.4rem;
+  }
+
+  @media print {
+    body { padding: 0; font-size: 11.5pt; }
+    .page { max-width: 100%; }
+    h2 { page-break-after: avoid; }
+    h3 { page-break-after: avoid; }
+    table, pre, .figure { page-break-inside: avoid; }
+  }
+
+  @media (max-width: 640px) {
+    body { padding: 2rem 1.1rem 4rem; }
+  }
+</style>
+
+<div class="page">
+
+<div class="title-block">
+  <h1>Retrieval-Augmented Generation over Five NLP Research Papers</h1>
+  <p class="subtitle">Generative AI Fundamentals — Final Report</p>
+  <div class="meta">
+    <div><strong>Author:</strong> Ankit Goel</div>
+    <div><strong>Source documents:</strong> Transformer, BERT, RoBERTa, T5, GPT-3 (arXiv)</div>
+    <div><strong>Stack:</strong> Python, FAISS, Ollama (llama3.2 + nomic-embed-text) — all running locally</div>
+  </div>
+</div>
+
+<h2>1. Overview</h2>
+
+<p>I built a question-answering bot that answers questions about five NLP research
+papers. It remembers the last four turns of a conversation, so I can ask a follow-up
+question using "it" or "that" and it still knows what I mean.</p>
+
+<p>The whole thing runs on my own machine. There is no cloud API and no API key.
+The models are served locally by Ollama.</p>
+
+<h3>What RAG is, and why I needed it</h3>
+
+<p>If you ask a language model a question directly, it can only answer from what it
+memorised during training. It has never seen my five PDFs. Worse, if it does not know
+something it will often make up an answer that sounds confident.</p>
+
+<p>RAG fixes this by adding a search step before the model answers. First I search my
+own documents for the parts that look relevant. Then I paste those parts into the
+prompt and tell the model to answer using only that text. The model never "learns" my
+documents — every single time it answers, I hand it the relevant text fresh.</p>
+
+<div class="figure">Question
+   |
+   |  1. search my documents  ->  5 most relevant chunks
+   |
+   |  2. put those chunks + the last 4 turns + the question into one prompt
+   |
+   |  3. send that prompt to the language model
+   v
+Answer</div>
+<p class="caption">Figure 1. What happens each time someone asks a question.</p>
+
+<h3>Two models, two different jobs</h3>
+
+<p>This confused me at first, so I want to be clear about it. There are two models and
+they never talk to each other:</p>
+
+<ul>
+  <li><strong>nomic-embed-text</strong> turns a piece of text into 768 numbers. It never
+  writes sentences. Its only job is to make text comparable by maths, so similar text
+  can be <em>found</em>.</li>
+  <li><strong>llama3.2</strong> reads the text that was found and <em>writes</em> the
+  answer. This is the only part that actually understands language.</li>
+</ul>
+
+<p>FAISS, the vector database, runs no model at all. It just compares numbers.</p>
+
+<h3>Why I did not use a framework</h3>
+
+<p>I wrote every stage myself in plain Python instead of using LangChain or LlamaIndex.
+The assignment does not require a framework, and writing it by hand meant I actually
+had to understand chunk boundaries, how retrieval maps back to text, how a prompt is
+built, and how memory is trimmed. If I had used a framework, most of that would have
+been hidden behind one-line function calls that I could not explain.</p>
+
+<p>I did later build a second version using LangChain on a separate branch, to see what
+the trade-off looked like in practice. That is discussed in section 4.</p>
+
+<h2>2. Technical Implementation</h2>
+
+<h3>2.1 Extracting text from the PDFs</h3>
+
+<p><code>src/ingestion.py</code> uses the <code>pypdf</code> library to pull the text out
+of each page.</p>
+
+<p>The problem is that a PDF is a page-layout format, not a text format. When you extract
+text you also get everything that repeats on every page: the paper's running title, page
+numbers, footers. If I left that in, it would end up inside my chunks and get embedded as
+if it were real content.</p>
+
+<p>Instead of writing a list of known headers to remove, I detect noise by how it
+behaves: <strong>any line that appears on 60% or more of a document's pages is treated as
+a header or footer and removed</strong>, no matter what it says. I also remove lines that
+are only a page number, using a regular expression. This works on any PDF without me
+having to tune it per document.</p>
+
+<h3>2.2 Chunking</h3>
+
+<p><code>src/chunking.py</code> cuts the cleaned text into pieces. I cannot embed a whole
+15-page paper as one vector — a single list of 768 numbers cannot represent that much, and
+even if it could, a search would only ever return "the whole paper" instead of the
+paragraph that actually answers the question.</p>
+
+<p>Chunk size is a real trade-off. Too small and the chunk has no context and does not
+make sense on its own. Too big and its vector becomes an average of several ideas and
+matches nothing precisely. I settled on these values:</p>
+
+<div class="table-wrap">
+<table>
+  <caption>Table 1. Chunking settings.</caption>
+  <thead>
+    <tr><th>Setting</th><th class="num">Value</th><th>What it does</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>TARGET_WORDS</code></td><td class="num">250</td><td>Stop adding to a chunk once it would go past this</td></tr>
+    <tr><td><code>MAX_WORDS</code></td><td class="num">400</td><td>Hard cap on any single piece of text</td></tr>
+    <tr><td><code>OVERLAP_WORDS</code></td><td class="num">45</td><td>Words repeated from the end of one chunk at the start of the next</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>I split on blank lines first, because a blank line usually means a paragraph break.
+But <code>pypdf</code> does not reliably preserve blank lines in every PDF, and on my
+first attempt one chunk came out at 4,926 words. So I added two fallbacks: if a block is
+still over 400 words, split it into sentences; if even one sentence is over 400 words
+(which happens with tables and formulas), chop it by word count. That guarantees nothing
+oversized ever reaches the next stage.</p>
+
+<p><strong>Why the overlap matters.</strong> Imagine a sentence landing exactly on a
+chunk boundary: "The base model uses 8 attention heads, | each with dimension 64."
+Without overlap neither chunk contains the full fact, and whichever one gets retrieved
+gives half an answer. Repeating the last 45 words at the start of the next chunk means
+the complete sentence survives in at least one of them.</p>
+
+<p>The result is <strong>398 chunks</strong> across the five papers, averaging 287 words
+each.</p>
+
+<div class="table-wrap">
+<table>
+  <caption>Table 2. Chunks produced per source document.</caption>
+  <thead>
+    <tr><th>Paper</th><th>arXiv ID</th><th class="num">Chunks</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Attention Is All You Need (Transformer)</td><td>1706.03762</td><td class="num">25</td></tr>
+    <tr><td>BERT</td><td>1810.04805</td><td class="num">45</td></tr>
+    <tr><td>RoBERTa</td><td>1907.11692</td><td class="num">33</td></tr>
+    <tr><td>T5</td><td>1910.10683</td><td class="num">137</td></tr>
+    <tr><td>GPT-3</td><td>2005.14165</td><td class="num">158</td></tr>
+    <tr><td colspan="2"><strong>Total</strong></td><td class="num"><strong>398</strong></td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3>2.3 Embeddings and the vector database</h3>
+
+<p><code>src/vectorstore.py</code> sends every chunk to the <code>nomic-embed-text</code>
+model through Ollama, which returns 768 numbers per chunk. I send them in batches of 32
+rather than one at a time, which turns 398 HTTP requests into about 13.</p>
+
+<p>I then normalise every vector to length 1. This means only the <em>direction</em> of
+the vector carries meaning, not its size — which is what I want, because I care what the
+text is about, not how long it is. Once every vector has length 1, the cheap calculation
+FAISS uses (inner product) gives exactly the same result as the standard similarity
+measure (cosine similarity).</p>
+
+<p>For the index I used <code>faiss.IndexFlatIP</code>. "Flat" means it compares against
+every stored vector with no shortcuts, so results are exact. FAISS also offers
+approximate index types that are much faster on millions of vectors but give slightly
+wrong answers. With only 398 vectors, exact search is already instant, so there is
+nothing to gain by trading away accuracy.</p>
+
+<p>One design detail worth calling out, because it caused me a problem later.
+<strong>FAISS only stores numbers.</strong> When you search it, it gives you back row
+numbers like 142 — it has no idea what text row 142 was. I rely on the fact that
+<code>chunks.json</code> is in exactly the same order the index was built in, so
+<code>chunks[142]</code> is the right chunk. There is no ID linking them, just matching
+position. It works, but it is fragile, and section 4 explains how it broke.</p>
+
+<h3>2.4 Integrating the language model</h3>
+
+<p><code>src/bot.py</code> handles answering. Calling a language model turned out to be
+much less mysterious than I expected: Ollama runs a small web server on my machine at
+<code>localhost:11434</code>, and I just POST some JSON to it and read the JSON that
+comes back. It is an ordinary HTTP request.</p>
+
+<p>The request body uses the standard chat format, which is a list of messages each
+having a role:</p>
+
+<pre>[{"role": "system",    "content": "answer only from the given context..."},
+ {"role": "user",      "content": "what is BERT?"},
+ {"role": "assistant", "content": "BERT is..."},        &lt;- an earlier reply
+ {"role": "user",      "content": "how is it trained?"}]</pre>
+
+<p>The system message holds my standing instructions: answer only from the provided
+context, say so explicitly if the context is not enough rather than guessing, and cite
+the source as <code>[doc_id, page X]</code>.</p>
+
+<p>For each question I retrieve the top 5 chunks, join them into one labelled block of
+text, and put that into the prompt along with the question. The model makes exactly
+<strong>one</strong> call per question. It never sees the five chunks as five separate
+things — by the time it reads the prompt it is just text, like someone pasting five
+excerpts into a chat.</p>
+
+<h3>2.5 Conversational memory</h3>
+
+<p>The important thing I learned here is that <strong>the model has no memory of its
+own</strong>. Every call is independent. "Memory" simply means I resend the earlier turns
+as part of the next prompt.</p>
+
+<p>I store the last four question-and-answer pairs in a
+<code>collections.deque(maxlen=4)</code>. A deque with a maximum length automatically
+throws away the oldest item when you add a fifth, so that one line is the entire memory
+implementation — there is no "if there are too many, remove the first one" code to get
+wrong. The assignment asks for the last 4 interactions, and this says that directly.</p>
+
+<p>To check it actually worked I added a line printing how many turns are held. Watching
+it climb 0, 1, 2, 3, 4 and then stay at 4 forever is much more convincing than asking the
+bot what it remembers, because the bot's own answer about its memory is not reliable
+evidence.</p>
+
+<h2>3. Evaluation</h2>
+
+<h3>3.1 The 10 test questions</h3>
+
+<p>I wrote 10 questions covering all five papers. Four of them are deliberately written
+as follow-ups that use a pronoun instead of naming the paper, so they can only be answered
+correctly if memory is working. For example question 3 asks about the Transformer, and
+then question 4 asks "How many attention heads does <em>that model</em> use?" — nothing in
+question 4 says Transformer.</p>
+
+<div class="table-wrap">
+<table>
+  <caption>Table 3. Question coverage across the five papers.</caption>
+  <thead>
+    <tr><th>Paper</th><th class="num">Questions</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>T5</td><td class="num">3</td></tr>
+    <tr><td>Transformer</td><td class="num">3</td></tr>
+    <tr><td>GPT-3</td><td class="num">2</td></tr>
+    <tr><td>BERT</td><td class="num">1</td></tr>
+    <tr><td>RoBERTa</td><td class="num">1</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>All 10 questions run through <strong>one continuous conversation</strong>, not a fresh
+one each time. This matters: a fresh session per question would start with empty memory
+every time, and the follow-up questions would never actually test anything.</p>
+
+<h3>3.2 Why I designed my own metric</h3>
+
+<p>The assignment allows either an established framework (RAGAS, Trulens) or my own
+metric, as long as I document the criteria and methodology clearly. I chose my own metric,
+but only after genuinely trying RAGAS and finding it did not work on my setup. That whole
+investigation is in section 4.3, because I think the reason is more interesting than the
+decision.</p>
+
+<h3>3.3 How the scoring works</h3>
+
+<p>There is no automatic way to check whether an answer written in English is "good". I
+cannot compare it to an expected string, because a dozen different wordings could all be
+correct. So I use the technique known as <strong>LLM-as-judge</strong>: I ask a language
+model to grade the answer, the way a teacher marks an essay against a rubric.</p>
+
+<p>This means two separate model calls per question:</p>
+
+<ol>
+  <li>The bot <strong>answers</strong> the question (this is the system being tested).</li>
+  <li>The model <strong>grades</strong> that answer, given the question, the source chunks
+  that were retrieved, the memory that was available at that moment, and the answer
+  itself.</li>
+</ol>
+
+<p>The judge is given a rubric and asked to score 1 to 5 on each of the four criteria the
+assignment names, with a one-sentence justification for each. The rubric is written out in
+full in <code>JUDGE_SYSTEM_PROMPT</code> in <code>src/evaluate.py</code>. In short:</p>
+
+<div class="table-wrap">
+<table>
+  <caption>Table 4. Scoring criteria (1 = poor, 5 = excellent).</caption>
+  <thead>
+    <tr><th>Criterion</th><th>What the judge is asked</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Relevance</td><td>Does the answer directly address what was asked?</td></tr>
+    <tr><td>Accuracy</td><td>Is the answer consistent with the retrieved context specifically — not with the judge's own general knowledge?</td></tr>
+    <tr><td>Contextual Awareness</td><td>If the question used a pronoun referring to an earlier turn, did the answer resolve it correctly?</td></tr>
+    <tr><td>Response Quality</td><td>Is it clearly written, well organised, and appropriately detailed?</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>The accuracy criterion is worded carefully on purpose. I tell the judge to check the
+answer against the retrieved chunks <em>only</em>. If the answer states something true in
+general but not supported by the retrieved text, it should be marked down — because that
+would mean my retrieval failed and the model answered from memory instead.</p>
+
+<p>Everything is written to <code>data/eval/results.json</code>: every question, the
+answer, the five retrieved chunks with their similarity scores, the memory available at
+that turn, and all four scores with justifications.</p>
+
+<h2>4. Results and Discussion</h2>
+
+<h3>4.1 Scores</h3>
+
+<div class="table-wrap">
+<table>
+  <caption>Table 5. Final evaluation results, averaged over all 10 questions.</caption>
+  <thead>
+    <tr><th>Criterion</th><th class="num">Average (of 5)</th><th class="num">Percentage</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Relevance</td><td class="num">4.80</td><td class="num">96%</td></tr>
+    <tr><td>Accuracy</td><td class="num">5.00</td><td class="num">100%</td></tr>
+    <tr><td>Contextual Awareness</td><td class="num">4.90</td><td class="num">98%</td></tr>
+    <tr><td>Response Quality</td><td class="num">4.50</td><td class="num">90%</td></tr>
+    <tr><td colspan="3"><strong>All 10 of 10 questions scored successfully.</strong></td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>The memory questions worked. For example, question 4 ("How many attention heads does
+that model use?") was answered "According to [Source: 1706.03762, page 3], the base
+version of the model uses 8 parallel attention layers, or heads." It correctly resolved
+"that model" to the Transformer from the previous turn, and cited the page.</p>
+
+<p><strong>I want to be honest about these numbers rather than just presenting them.</strong>
+The same model, llama3.2, both writes the answers and grades them. That is not an
+independent check. A model may well be gentler on its own phrasing than a different model
+would be, and that is a plausible reason the scores sit so close to the ceiling. If I were
+doing this again with more time I would use a separate, larger model as the judge.</p>
+
+<h3>4.2 Challenge: Ollama was silently cutting my prompts short</h3>
+
+<p>This was the most serious problem I found, and I only found it late.</p>
+
+<p>Ollama has a setting called <code>num_ctx</code>, the context window, which defaults to
+<strong>2048 tokens</strong>. I had never set it. I measured what my prompts actually come
+to: my chunks average 287 words, so 5 retrieved chunks is roughly 1,400 tokens; add the
+system prompt, the question, and four turns of conversation memory and a full prompt comes
+to about <strong>2,100 tokens</strong>.</p>
+
+<p>That is over the limit. And Ollama does not raise an error when a prompt is too long —
+it silently cuts off the oldest part. So on exactly the later questions where memory
+matters most, part of my conversation memory was being thrown away before the model ever
+saw it, and nothing anywhere reported a problem.</p>
+
+<p>I fixed it by setting <code>num_ctx</code> to 8192 explicitly, and confirmed it took
+effect by checking Ollama's own <code>/api/ps</code> endpoint, which now reports
+<code>context_length: 8192</code>. The lesson I took from this is that a library default
+being wrong for your use case will not necessarily announce itself.</p>
+
+<h3>4.3 Challenge: RAGAS could not produce scores on my machine</h3>
+
+<p>I was asked to target four specific RAGAS metrics with minimum thresholds:
+Faithfulness above 90%, Answer Correctness above 80%, Context Recall above 85%, and
+Context Precision above 80%. I made two serious attempts and could not get it working.
+This is what happened.</p>
+
+<p><strong>First attempt.</strong> Installing RAGAS broke immediately: it imports a Google
+Vertex AI class that the current version of <code>langchain-community</code> has moved,
+so it would not even import. I fixed that by pinning older, compatible versions of
+<code>langchain</code> and <code>langchain-community</code>. Then every job started timing
+out. The cause was that RAGAS sends many requests in parallel by default, which is fine
+against a cloud API but not against Ollama on my laptop, which handles one generation at a
+time. Everything was queuing up and expiring while it waited. I fixed that too, by telling
+RAGAS to run one request at a time. After all of that, a 2-question test took 55 minutes
+and still returned "nan" (no score) for several metrics.</p>
+
+<p><strong>Second attempt.</strong> The first attempt had a fair weakness as evidence: I
+had not tuned Ollama at all. It was reloading the model between calls, and running at that
+2048-token default, which would truncate RAGAS's prompts — and RAGAS's prompts are long,
+because each metric ships worked examples inside it. So I rebuilt it properly and checked
+each setting actually reached Ollama:</p>
+
+<div class="table-wrap">
+<table>
+  <caption>Table 6. Settings tested in the second RAGAS attempt.</caption>
+  <thead>
+    <tr><th>Setting</th><th>Problem it was meant to fix</th><th>Confirmed?</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>keep_alive = 30m</code></td><td>Model being unloaded between calls</td><td>Yes</td></tr>
+    <tr><td><code>num_ctx = 16384</code></td><td>Long prompts being truncated</td><td>Yes — <code>/api/ps</code> reported it</td></tr>
+    <tr><td><code>format = json</code></td><td>Model returning text that is not valid JSON</td><td>Yes</td></tr>
+    <tr><td><code>max_workers = 1</code></td><td>Too many requests at once</td><td>Yes</td></tr>
+    <tr><td><code>timeout = 900s</code></td><td>Calls being cut off too early</td><td>Yes</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>The result of the 2-question test run:</p>
+
+<pre>faithfulness         no valid scores (all nan)
+answer_correctness   no valid scores (all nan)
+context_recall       no valid scores (all nan)
+context_precision    100.0%  (need &gt;80%)  PASS</pre>
+
+<p>Three of the four metrics failed with a parsing error, where llama3.2 either produced
+an opening brace and stopped, or repeated RAGAS's instructions back instead of following
+them. One metric exceeded even the 15-minute timeout. The run took about 25 minutes for
+two questions, which works out to roughly four to six hours for all ten.</p>
+
+<p><strong>The detail that told me what was really wrong:</strong> the only metric that
+worked, Context Precision, is also the only one of the four that does not ask the model to
+<em>generate</em> complicated structured JSON. Every metric that asked llama3.2 to break
+text into schema-shaped JSON statements failed. The one that did not, passed.</p>
+
+<p>So the problem is not configuration — I tested and eliminated every configuration
+explanation. The problem is that llama3.2 is a 3-billion-parameter model, and RAGAS was
+designed and tested against large cloud models like GPT-4. Its metrics also chain several
+model calls together per question, which is cheap against a fast cloud API and very
+expensive against a small model running on a CPU.</p>
+
+<p>Given that three of the four required metrics returned no score at all — not a low
+score, <em>no</em> score — I could not honestly report RAGAS numbers. I used my own
+documented metric, which the assignment explicitly allows, and it produces a complete set
+of results in about 20 minutes.</p>
+
+<p>I should be clear about what this costs me. The two sets of four criteria are not the
+same things:</p>
+
+<div class="table-wrap">
+<table>
+  <caption>Table 7. The two sets of criteria are different measurements.</caption>
+  <thead>
+    <tr><th>Assignment's four aspects (my metric covers these)</th><th>RAGAS's four metrics (not covered)</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Relevance</td><td>Faithfulness</td></tr>
+    <tr><td>Accuracy</td><td>Answer Correctness</td></tr>
+    <tr><td>Contextual Awareness</td><td>Context Recall</td></tr>
+    <tr><td>Response Quality</td><td>Context Precision</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>The real capability I am missing is that Context Recall and Context Precision measure
+<strong>retrieval quality on its own</strong>. My judge only ever sees the final answer, so
+it cannot tell the difference between "the model reasoned badly" and "retrieval handed it
+the wrong chunks". That is a genuine gap, not something I want to gloss over.</p>
+
+<p>The one thing I did not get to test is a larger model. A 7 or 8 billion parameter model
+follows structured-output instructions much better, and I think that is the most likely
+way to make RAGAS work on a local setup.</p>
+
+<h3>4.4 Challenge: a retry that made things worse</h3>
+
+<p>After raising <code>num_ctx</code>, an evaluation run crashed with a 500 error from
+Ollama. Two separate mistakes were behind it.</p>
+
+<p>First, my retry logic was wrong in a way I did not expect. A request timeout in the
+<code>requests</code> library is client-side only — Ollama carries on generating the
+response I stopped waiting for. So retrying straight away put a second generation running
+alongside the first, and two large context windows at once was enough to make the server
+fail. Raising <code>num_ctx</code> is what made this fatal; at 2048 it had been harmless.
+I fixed it by waiting 30 seconds before retrying, so the first request can finish and
+release its memory.</p>
+
+<p>Second, and worse, that one failed call killed the whole run. The error travelled up
+past <strong>nine already-completed judgements</strong> and the process died before writing
+anything to disk. About twenty minutes of work was lost because of one bad HTTP response.
+I changed the judge to catch the failure and record that single question as unscored
+instead. One missing score is a footnote in the results; an aborted run is a lost
+afternoon.</p>
+
+<h3>4.5 Challenge: my chunk and index files went out of sync</h3>
+
+<p>I mentioned in section 2.3 that FAISS returns row numbers and I rely on
+<code>chunks.json</code> being in the same order. That fragility bit me.</p>
+
+<p>My generated data files are excluded from git because they can be rebuilt. When I
+switched between branches, git did not restore them — so I ended up with a
+<code>chunks.json</code> from one version paired with a <code>faiss.index</code> from
+another. Different chunk counts, different fields.</p>
+
+<p>It crashed with a clear error, which I was lucky about. If the two versions had used the
+same field names and only the <em>order</em> had differed, there would have been no error
+at all — every answer would just have cited the wrong source, silently. The fix is simple
+(always regenerate both files together), but it showed me concretely why linking two files
+by position rather than by ID is risky.</p>
+
+<h3>4.6 Building the same thing with LangChain</h3>
+
+<p>Out of interest I rebuilt the pipeline using LangChain on a separate branch, keeping all
+LangChain code in a single file so the rest of the project did not depend on it.</p>
+
+<p>What it genuinely improved: my roughly 80 lines of chunking logic became one configured
+splitter object, and LangChain's FAISS wrapper stores the vectors and the text
+<em>together</em>, which removes the fragile position-matching problem from section 4.5
+entirely.</p>
+
+<p>What it did not improve: my header and footer detection and my section tagging have no
+LangChain equivalent, so they stayed exactly as they were. A framework removes the
+boilerplate, not the parts specific to your problem.</p>
+
+<p>It also had costs. I hit three separate version conflicts getting the packages to work
+together. And one convenience method turned out to send all 527 chunks in a single HTTP
+request, which timed out, so I had to add batching back by hand — the same batching I had
+already written myself in the original version.</p>
+
+<p>Usefully, the LangChain version is what led me to find the <code>num_ctx</code> bug in
+section 4.2, which I then fixed in the main version. I kept the hand-written version as my
+submission because I can explain every line of it.</p>
+
+<h3>4.7 What I would improve</h3>
+
+<ul>
+  <li><strong>Rewrite follow-up questions before searching.</strong> Right now retrieval
+  uses only the literal words of the current question. If someone asks "what about its
+  encoder?", the search does not know what "its" refers to, even though the model does when
+  it writes the answer. Memory affects how the answer is written, but not what gets
+  searched for.</li>
+  <li><strong>Filter out weak matches.</strong> I always send exactly 5 chunks to the
+  model, however poor the match. A minimum similarity score would stop irrelevant text
+  reaching the prompt at all.</li>
+  <li><strong>Use a different model as judge</strong>, to remove the self-grading bias
+  described in section 4.1.</li>
+  <li><strong>Retry RAGAS with a 7B model</strong>, which would probably fix the
+  structured-output failures and give me the retrieval-quality metrics I am currently
+  missing.</li>
+</ul>
+
+<h2>5. Conclusion</h2>
+
+<p>The system does what the assignment asked. It ingests five PDFs and cleans the
+extraction noise out of them, cuts them into 398 chunks with overlap, embeds those chunks
+and stores them in a FAISS index, retrieves the five most relevant chunks for any question,
+generates an answer with a local open-source model using only that retrieved text, and
+remembers the last four turns so follow-up questions work. It scores between 90% and 100%
+across the four required criteria on all ten test questions.</p>
+
+<p>What I actually learned was mostly from the things that went wrong. Calling a language
+model turned out to be an ordinary HTTP request, not something mysterious. A model has no
+memory of its own — "memory" just means resending earlier turns. And the two most serious
+bugs I found, the silent prompt truncation and the retry that made a failure worse, were
+both invisible: nothing crashed and nothing was logged. I only found them by measuring what
+was really being sent rather than trusting that the defaults were sensible.</p>
+
+<p>The RAGAS investigation was the same kind of lesson. I could have written that RAGAS was
+too slow and left it there. Testing each explanation properly and eliminating them one by
+one gave me a much better answer: the failure is the small model's ability to produce
+structured output, not the configuration, and the proof is that the only metric that
+worked is the only one that does not require it.</p>
+
+<h2>Appendix: running the code</h2>
+
+<p>Run every command from the project root. The scripts read paths relative to that folder,
+so running them from inside <code>src/</code> will not work.</p>
+
+<pre>ollama pull nomic-embed-text
+ollama pull llama3.2
+
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+python src/chunking.py      # PDFs -> data/processed/chunks.json
+python src/vectorstore.py   # chunks -> embeddings -> faiss.index
+python src/bot.py           # interactive chat, type "quit" to exit
+python src/evaluate.py      # 10 questions + scoring -> results.json</pre>
+
+<div class="table-wrap">
+<table>
+  <caption>Table 8. Source files.</caption>
+  <thead>
+    <tr><th>File</th><th>What it does</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>src/config.py</code></td><td>Shared paths, model names and settings</td></tr>
+    <tr><td><code>src/ingestion.py</code></td><td>PDF text extraction and noise cleaning</td></tr>
+    <tr><td><code>src/chunking.py</code></td><td>Splits cleaned text into overlapping chunks</td></tr>
+    <tr><td><code>src/vectorstore.py</code></td><td>Embeddings and the FAISS index</td></tr>
+    <tr><td><code>src/bot.py</code></td><td>Retrieval, prompt building, memory, the model call</td></tr>
+    <tr><td><code>src/evaluate.py</code></td><td>The 10 test questions and the scoring</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>The four Python packages needed are listed in <code>requirements.txt</code>. There is no
+RAG framework in the submitted version. The models are not installed by pip — they are
+served by Ollama, which is installed separately.</p>
+
+</div>
