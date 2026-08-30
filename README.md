@@ -1,352 +1,77 @@
 # RAG Assignment — Conversational PDF Q&A Bot
 
-A Retrieval-Augmented Generation (RAG) application that answers questions about 5 NLP research
-papers (Transformer, BERT, RoBERTa, T5, GPT-3), remembers the last 4 turns of conversation, and
-runs entirely locally using [Ollama](https://ollama.ai) + [FAISS](https://github.com/facebookresearch/faiss) — no cloud API, no API key.
+A Retrieval-Augmented Generation (RAG) application that answers questions about 5 NLP
+research papers (Transformer, BERT, RoBERTa, T5, GPT-3), remembers the last 4 turns of
+conversation, and runs entirely locally using [Ollama](https://ollama.ai) +
+[FAISS](https://github.com/facebookresearch/faiss) — no cloud API, no API key.
 
-Built for the "Generative AI Fundamentals" assignment. Every stage — PDF extraction,
-chunking, embeddings, vector search, and conversational memory — is implemented from scratch in
-plain Python (no LangChain/LlamaIndex), so the mechanics of RAG are fully visible rather than
-hidden behind a framework.
+Every stage — PDF extraction, chunking, embeddings, vector search, conversational memory,
+and evaluation — is implemented from scratch in plain Python, with no RAG framework.
 
-> **A parallel LangChain implementation exists on the [`UseLangchain`](../../tree/UseLangchain)
-> branch**, built to evaluate the trade-off rather than to replace this one. It reduced
-> boilerplate substantially and eliminated a fragile positional link between the chunk file and
-> the index — and, usefully, surfaced a real correctness bug in this implementation (prompt
-> truncation from an unset context window), which has since been fixed here. RAGAS was also
-> implemented and tested on that branch; three of its four metrics could not produce scores on a
-> 3B local model. Both findings are documented in `TECHNICAL_DETAILS.md`.
-
----
-
-## Table of contents
-
-- [How it works, in one picture](#how-it-works-in-one-picture)
-- [Terminology](#terminology)
-- [Project structure](#project-structure)
-- [Setup](#setup)
-- [Running the pipeline](#running-the-pipeline)
-- [Stage-by-stage details](#stage-by-stage-details)
-- [Design decisions](#design-decisions)
-- [Current status](#current-status)
-- [Known limitations](#known-limitations)
-
----
-
-## How it works, in one picture
-
-RAG has two phases that run at completely different times: **indexing** (once, offline) and
-**query** (every time the user asks something).
-
-```
-INDEXING (run once, offline — src/chunking.py then src/vectorstore.py)
-────────────────────────────────────────────────────────────────────────
-  5 PDFs
-    │  ingestion.py: pypdf extracts raw text, strips headers/footers/page numbers
-    ▼
-  cleaned per-page text
-    │  chunking.py: splits into ~250-word chunks with 45-word overlap
-    ▼
-  chunks.json   (398 chunks: {chunk_id, doc_id, page_start, section, text, ...})
-    │  vectorstore.py: embed_texts() calls Ollama's nomic-embed-text model
-    ▼
-  faiss.index   (one 768-dim vector per chunk, same row order as chunks.json)
-
-
-QUERY (every time the user asks a question — src/bot.py)
-────────────────────────────────────────────────────────────────────────
-  "How does BERT's masked language modeling work?"
-    │  embed_texts([question])  — same embedding model as above
-    ▼
-  query vector (768 numbers)
-    │  faiss index.search(query_vector, k=5)  — pure vector math, NO model call
-    ▼
-  top-5 matching rows + similarity scores  →  looked up in chunks.json
-    │  format_context() — stitches the 5 chunks into one labeled text block
-    ▼
-  "[Source: BERT, page 4]\n...\n\n[Source: RoBERTa, page 3]\n...\n\nQuestion: ..."
-    │  + last 4 turns of conversation history prepended
-    ▼
-  ONE call to llama3.2 via Ollama's /api/chat
-    ▼
-  final answer (single string) — also appended to memory for the next turn
-```
-
-The key thing this diagram is meant to make obvious: **the embedding model and the LLM are two
-different models used for two different jobs**, and they never talk to each other directly.
-The embedding model turns text into vectors so similar text can be *found*. The LLM reads
-whatever text was found and *reasons* over it to produce an answer. FAISS itself runs no model at
-all — it's pure numeric similarity search.
-
----
-
-## Terminology
-
-| Term | Meaning in this project |
-|---|---|
-| **Chunk** | A ~250-word slice of a paper's text, small enough to embed meaningfully and retrieve precisely. See `chunks.json`. |
-| **Embedding** | A list of numbers (a vector, 768 of them here) that represents a piece of text's *meaning* in a way that can be mathematically compared. Produced by the `nomic-embed-text` model. |
-| **Vector store / vector database** | A structure optimized for finding the vectors most similar to a query vector. Here: FAISS's `IndexFlatIP`. |
-| **FAISS** | Facebook AI Similarity Search — the library used as the vector store. `IndexFlatIP` does exact (brute-force) inner-product search, which is fine at this corpus size (~400 vectors). |
-| **Cosine similarity / inner product** | A measure of how "close" two vectors are in direction. Vectors here are L2-normalized (`vectorstore.py: normalize()`) so FAISS's inner product search is equivalent to cosine similarity. |
-| **Top-k retrieval** | Asking the vector store for the `k` closest chunks to a query (here `k=5`, `bot.py: TOP_K`). It's a setting you choose, unrelated to the model itself. |
-| **LLM (Large Language Model)** | The model that reads retrieved text and generates a natural-language answer. Here: `llama3.2`, run locally via Ollama. |
-| **Retrieval** | The search step (embed question → FAISS search) — finds *candidate* relevant text. Does not itself answer the question. |
-| **Generation** | The LLM step — reads the retrieved context and actually produces the answer, including deciding what's relevant, ignoring noise, and phrasing a direct response. |
-| **Context window / prompt context** | The block of retrieved chunk text + conversation history that gets sent to the LLM alongside the question. |
-| **Conversational memory** | The last `MEMORY_TURNS=4` (question, answer) pairs, held in a `collections.deque(maxlen=4)` in `ChatSession`, replayed as prior turns in each new prompt. |
-| **Hallucination** | When an LLM states something not actually supported by the given context — either invented, or recalled from its own pretraining instead of the retrieved text. A real risk this pipeline's system prompt tries to guard against. |
-| **System prompt** | The fixed instruction given to the LLM on every call, telling it how to behave (answer only from context, cite sources, admit when it doesn't know). See `bot.py: SYSTEM_PROMPT`. |
-| **Positional join** | This project's specific design detail: FAISS row `i` always corresponds to `chunks[i]` in `chunks.json` — there's no separate ID-based metadata lookup, just matching array position. |
-
----
-
-## Project structure
-
-```
-rag-assignment/
-├── README.md                    # this file
-├── TECHNICAL_DETAILS.md         # full function-by-function deep dive + design reasoning
-├── PYTHON_KNOWLEDGEBASE.md      # Python syntax reference (for readers coming from C#/.NET)
-├── data/
-│   ├── pdfs/                    # the 5 source papers (Transformer, BERT, RoBERTa, T5, GPT-3)
-│   ├── processed/                # generated at runtime — chunks.json, embeddings.npy, faiss.index
-│   └── eval/
-│       ├── questions.json        # the 10 test questions
-│       └── results.json           # generated by evaluate.py — answers + LLM-as-judge scores
-└── src/
-    ├── config.py                 # shared paths + Ollama model names, used by every stage
-    ├── ingestion.py               # PDF → raw text → cleaned text (strip headers/footers/page numbers)
-    ├── chunking.py                # cleaned text → chunks.json (paragraph/sentence-aware, with overlap)
-    ├── vectorstore.py             # chunks.json → embeddings → faiss.index
-    ├── bot.py                     # the conversational bot: retrieval + prompt building + LLM call + memory
-    └── evaluate.py                # runs the 10 questions + LLM-as-judge scoring → results.json
-```
-
-`data/processed/` is regenerated by running the pipeline — it's not committed to git.
+**See `FINAL_REPORT.pdf` for the full write-up** — architecture, why each design
+decision was made, the evaluation methodology and results, and the problems hit while
+building it (including why RAGAS was tried and not used). This file only covers how to
+set up and run the code.
 
 ---
 
 ## Setup
 
-**1. Install and start Ollama**, then pull the two models this project uses:
+**1. Install [Ollama](https://ollama.ai)**, then pull the two models this project uses:
 ```bash
 ollama pull nomic-embed-text
 ollama pull llama3.2
 ```
-Ollama must be running and reachable at `http://localhost:11434` (the default) — see
-`src/config.py: OLLAMA_BASE_URL` if yours differs.
+Ollama must be running and reachable at `http://localhost:11434` (the default).
 
-**2. Create a virtual environment and install Python dependencies:**
+**2. Create a virtual environment and install dependencies:**
 ```bash
-python -m venv .venv
-.venv\Scripts\activate          # Windows
-# source .venv/bin/activate     # macOS/Linux
+python3 -m venv .venv
+source .venv/bin/activate       # Windows: .venv\Scripts\activate
 
-pip install pypdf faiss-cpu numpy requests
+pip install -r requirements.txt
 ```
 
-**3. Confirm the 5 source PDFs are in `data/pdfs/`** (already included in this repo).
+**3. Confirm the 5 source PDFs are in `data/pdfs/`** (already included).
 
 ---
 
-## Running the pipeline
+## Running
 
-Run every command from the **project root** (not from inside `src/`) — the paths in
-`config.py` (`data/pdfs`, `data/processed`, ...) are relative to the root, and running a
-script as `python src/whatever.py` (rather than `cd`-ing into `src/` first) is what lets
-Python resolve both the sibling imports (e.g. `bot.py` importing `config`) and those data
-paths correctly at the same time. Each script also has useful debug output when run directly.
+Run every command from the **project root**, not from inside `src/` — the file paths in
+`config.py` are relative to the root.
 
 ```bash
-# 1. Build the chunk file (also runs ingestion internally)
+# 1. Extract, clean, and chunk all 5 PDFs
 python src/chunking.py
 #    → writes data/processed/chunks.json
 
-# 2. Build embeddings + FAISS index
+# 2. Generate embeddings and build the FAISS index
 python src/vectorstore.py
 #    → writes data/processed/embeddings.npy and data/processed/faiss.index
-#    → also runs a sample query at the end as a sanity check
 
-# 3. Chat with the bot
+# 3. Chat with the bot interactively
 python src/bot.py
-#    → interactive REPL: type a question, type "quit" to exit
+#    → type a question, type "quit" to exit
 
-# 4. Run the 10-question evaluation (see Stage 5 below)
+# 4. Run the 10-question evaluation
 python src/evaluate.py
-#    → writes data/eval/results.json and prints a scoring summary
+#    → writes data/eval/results.json and prints the scoring summary
 ```
 
 ---
 
-## Stage-by-stage details
+## Files
 
-### 1. PDF ingestion & cleaning — `src/ingestion.py`
-- `extract_pages()`: uses `pypdf.PdfReader` to pull raw text out of each page.
-- `find_repeated_lines()` / `clean_pages()`: PDFs extract with recurring noise — running headers,
-  footers, standalone page numbers. This is detected **structurally**, not by keyword: any line
-  that repeats on ≥60% of a document's pages is treated as noise and stripped, regardless of what
-  it actually says. Standalone page numbers are caught with a regex. Runs of 3+ blank lines are
-  collapsed.
-
-### 2. Chunking — `src/chunking.py`
-- `split_into_segments()`: splits each page on blank lines (paragraph breaks). Since not every
-  PDF preserves those reliably, any block still over `MAX_WORDS=400` gets broken down further by
-  sentence (regex-based sentence splitting), and as a last resort by a hard word-count slice —
-  so nothing oversized ever reaches the next step, regardless of source formatting.
-- `build_chunks()`: greedily accumulates segments up to `TARGET_WORDS=250` per chunk. When a
-  chunk closes, its last `OVERLAP_WORDS=45` words are carried into the *start* of the next chunk
-  — this overlap means a sentence that would otherwise get cut in half across a chunk boundary
-  still has full context in at least one chunk.
-- `detect_section()`: best-effort tagging of which paper section (Introduction, Method, etc.) a
-  chunk falls in, used for citation/debugging, not for retrieval logic.
-- Output: `chunks.json` — the chunk order here is load-bearing (see "positional join" below).
-
-### 3. Embeddings + vector store — `src/vectorstore.py`
-- `embed_texts()`: batches text (32 at a time) into calls to Ollama's `/api/embed` with
-  `nomic-embed-text`, retrying failed batches with exponential backoff. This exact function is
-  reused unchanged by `bot.py` to embed the user's live question — same model, same code path,
-  so the query vector lands in the same vector space as the indexed chunks.
-- `normalize()`: L2-normalizes every vector so that FAISS's inner-product search behaves like
-  cosine similarity.
-- `faiss.IndexFlatIP`: builds an exact (brute-force) similarity index — chosen deliberately over
-  approximate indexes (IVF, HNSW, PQ) since ~400 vectors is small enough that exact search is
-  fast and there's no need for the extra complexity/accuracy trade-off those bring.
-- **No separate metadata database.** `chunks.json[row]` *is* the metadata for FAISS row `row` —
-  a hand-maintained positional link rather than an ID-based join.
-
-### 4. Conversational bot with memory — `src/bot.py`
-- `retrieve()`: embeds the incoming question, searches FAISS for the top `TOP_K=5` chunks, and
-  maps each result row back to its full chunk dict + similarity score. **All 5 results are
-  returned unconditionally — there is no relevance-score filtering.**
-- `format_context()`: concatenates the 5 chunks into one labeled text block
-  (`[Source: doc_id, page X]` + text), which becomes part of a single prompt.
-- `ChatSession`: owns a `deque(maxlen=4)` of past `(question, answer)` pairs. Each `ask()` call
-  retrieves fresh context for the *current* question, replays the last 4 turns as prior
-  user/assistant messages, appends the new context + question, sends **one** combined prompt to
-  `llama3.2` via `call_llama()`, and stores the new turn — automatically evicting the oldest turn
-  once more than 4 have accumulated.
-- The LLM only ever makes **one call per question**. It receives the 5 chunks already merged into
-  a single block of text — it has no awareness that "5 separate documents were retrieved"; it
-  just reads one prompt and reasons over everything in it, the same way a person would read a
-  page with several pasted excerpts before answering a question about them.
-
-### 5. Evaluation — `src/evaluate.py`
-- `run_interactions()`: asks all 10 questions from `data/eval/questions.json` through **one**
-  continuous `ChatSession`, in order — so the 4-turn memory window fills and evicts exactly as it
-  would in real use. It snapshots the memory available *before* each question is asked (needed by
-  the judge afterward) and records the retrieved chunks alongside the answer.
-- **LLM-as-judge scoring**: `judge_answer()` sends each `(question, retrieved context, memory
-  snapshot, answer)` to `llama3.2` a second time, with a rubric (`JUDGE_SYSTEM_PROMPT`) asking it
-  to score 1–5 on the assignment's four named criteria — Relevance, Accuracy, Contextual
-  Awareness, Response Quality — each with a one-sentence justification. This is the project's
-  self-devised metric: the rubric is fully defined in `JUDGE_SYSTEM_PROMPT`, not delegated to
-  RAGAS/Trulens. Parsing includes a fallback that repairs a truncated JSON response (a real
-  failure mode observed with this local model) before giving up on that one record.
-- The 10 questions (`data/eval/questions.json`) cover all 5 papers, and several are deliberately
-  written as pronoun-based follow-ups ("it"/"that" referring to a prior question's topic) so
-  answering them correctly requires the bot to actually resolve the reference from
-  `ChatSession.history` — not just from the retrieved text.
-- Output: `data/eval/results.json` (every question, answer, retrieved chunk, and judge score) plus
-  a printed summary of average scores per criterion.
-- **A real RAGAS-based evaluation was also attempted**, in response to a specific instructor
-  requirement naming exact RAGAS metrics (Faithfulness, Answer Correctness, Context Recall,
-  Context Precision) with minimum thresholds. It was ultimately removed from the codebase after
-  confirming it wasn't practical on this local CPU + `llama3.2` setup — see
-  `TECHNICAL_DETAILS.md`'s "RAGAS investigation" section for the full account (version conflicts,
-  concurrency overload, per-call latency, and unreliable structured output from a small local
-  model). The self-devised metric above is this project's actual, submitted evaluation
-  methodology.
-
----
-
-## Design decisions
-
-- **No LangChain / LlamaIndex anywhere in the project.** Every RAG primitive (PDF loader, text
-  splitter, embeddings wrapper, vector store wrapper, prompt template, memory) is hand-written.
-  This is deliberate: the assignment doesn't require a framework, and writing each piece by hand
-  is what makes the mechanics of RAG (chunk boundaries, the positional metadata link, prompt
-  construction, memory eviction) visible instead of hidden behind abstractions. A real LangChain +
-  `ragas`-based evaluation attempt was made at one point (in response to an instructor requirement
-  naming exact RAGAS metrics), but it was removed after confirming it wasn't practical on this
-  hardware — see `TECHNICAL_DETAILS.md`'s "RAGAS investigation" section for the full account.
-- **Self-devised evaluation metric, not RAGAS/Trulens.** Both are valid per the assignment, but
-  RAGAS in particular pulls in a heavy dependency chain (including LangChain) and its default
-  metrics assume an OpenAI model unless manually rewired — friction this project avoids by
-  documenting its own evaluation methodology instead (see `TECHNICAL_DETAILS.md`).
-- **Exact FAISS search (`IndexFlatIP`) over approximate indexes** — at ~400 vectors, brute-force
-  search is already fast; approximate methods would trade accuracy for speed the project doesn't
-  need.
-- **Retrieval always returns exactly `k` chunks, with no score threshold.** This is a known,
-  intentional simplification — see [Known limitations](#known-limitations).
-- **LLM-as-judge for evaluation, not manual scoring.** `evaluate.py` reuses `llama3.2` (the same
-  model that generates answers) as an automated judge against a documented rubric — the same
-  underlying technique RAGAS uses internally, but implemented directly rather than pulled in as a
-  dependency. See [Known limitations](#known-limitations) for the self-bias caveat this implies.
-
----
-
-## Current status
-
-| Stage | Status |
+| File | What it does |
 |---|---|
-| PDF extraction + noise cleaning | ✅ Done |
-| Chunking | ✅ Done (398 chunks) |
-| Embeddings | ✅ Done |
-| FAISS vector store | ✅ Done |
-| Retrieval + LLM integration | ✅ Done |
-| Conversational memory (4 turns) | ✅ Done |
-| Test harness (10 questions) | ✅ Done (`data/eval/questions.json`) |
-| Evaluation scoring (self-devised) | ✅ Done — LLM-as-judge, all 10 questions scored: Relevance 4.80 (96%), Accuracy 5.00 (100%), Contextual Awareness 4.90 (98%), Response Quality 4.50 (90%) |
-| Final report | ⬜ Not started |
-| Bonus: feedback into memory | ⬜ Not started |
-
-See `TECHNICAL_DETAILS.md` for the detailed reasoning behind each completed stage, including the
-RAGAS investigation.
-
----
-
-## Known limitations
-
-- **No follow-up query rewriting.** `retrieve()` embeds only the literal current question. A
-  follow-up like "what about its encoder?" won't be resolved against prior turns before
-  retrieval, so the vector search may miss what the user actually means — even though the *LLM*
-  still sees the conversation history when generating the answer.
-- **No relevance-score filtering on retrieval.** All top-`k` results are sent to the LLM
-  regardless of how low their similarity score is; there's no threshold (e.g. "drop anything
-  below 0.5") to exclude genuinely unrelated chunks from the prompt.
-- **Requires Ollama running locally** with both models pulled — the bot will fail its HTTP calls
-  otherwise (see `src/vectorstore.py: embed_texts()` and `src/bot.py: call_llama()` for the retry/
-  error behavior).
-- **Ollama's defaults are not safe to rely on.** Its default context window is 2048 tokens, while
-  a full prompt here measures around 2,100 once the memory window fills — and Ollama truncates
-  silently rather than erroring. `call_llama()` therefore sets `num_ctx` explicitly. This was
-  found late, after an earlier version of this project had been running truncated prompts on its
-  later questions without any visible symptom.
-- **A read timeout does not cancel the work.** `requests`' timeout is client-side only: Ollama
-  keeps generating the response we stopped waiting for. An immediate retry therefore runs a
-  second generation alongside the first, and two concurrent `num_ctx`-sized KV caches were enough
-  to produce a `500` from the server. `call_llama()` now waits `RETRY_BACKOFF` seconds before
-  retrying, and `judge_answer()` records a failed call rather than letting it abort a run that
-  has already completed nine of ten judgements.
-- **LLM-as-judge self-bias.** `evaluate.py` uses `llama3.2` to judge answers generated by the same
-  `llama3.2`, which can be more lenient toward its own phrasing/reasoning style than an
-  independent judge (e.g. a larger or different model) would be. The near-ceiling Accuracy/
-  Contextual Awareness scores (5.00/100% avg) should be read with that in mind — worth naming
-  explicitly as a methodology caveat in the report, not treated as proof the bot is flawless.
-- **The evaluation cannot measure retrieval quality on its own.** The judge only ever sees the
-  final answer, so a bad answer caused by *bad retrieval* and one caused by *bad reasoning over
-  good retrieval* score identically. RAGAS's `context_recall` / `context_precision` exist to
-  separate exactly those, and that capability is genuinely absent here.
-- **The chunks/index positional link is fragile, and desynced once in practice.** Because
-  `data/processed/` is gitignored, switching git branches does not restore matching artifacts —
-  a parallel implementation regenerated `chunks.json` with a different schema and chunk count,
-  leaving it paired with a stale `faiss.index`. It failed loudly only because the schemas
-  differed; had only the *order* changed, every citation would have been silently wrong. Fix:
-  always regenerate both together (`chunking.py` then `vectorstore.py`).
-- **RAGAS, on this local CPU + `llama3.2` setup, cannot produce usable scores.** Implemented and
-  tested twice — the second time with every configuration hypothesis fixed *and verified reaching
-  Ollama* — three of its four required metrics still returned `nan`. The decisive detail: the only
-  metric that worked is the only one not requiring the model to *generate* structured JSON, which
-  isolates the cause to a 3B model's capability rather than configuration. Full account in
-  `TECHNICAL_DETAILS.md`'s "RAGAS investigation" section.
+| `src/config.py` | Shared paths, model names, and settings used by every stage |
+| `src/ingestion.py` | Extracts text from the PDFs and strips headers/footers/page numbers |
+| `src/chunking.py` | Splits cleaned text into ~250-word overlapping chunks |
+| `src/vectorstore.py` | Embeds every chunk and builds the FAISS search index |
+| `src/bot.py` | Retrieval, prompt building, 4-turn memory, and the LLM call |
+| `src/evaluate.py` | Runs the 10 test questions and scores the answers |
+| `data/eval/questions.json` | The 10 test questions |
+| `data/eval/results.json` | Generated by `evaluate.py` — answers, retrieved chunks, and scores |
+| `requirements.txt` | Python dependencies (pip) |
+| `FINAL_REPORT.pdf` | The full report |
