@@ -8,16 +8,28 @@ a stateless helper function.
 """
 
 import json
+import time
 from collections import deque
 
 import faiss
 import requests
 
-from config import CHAT_MODEL, CHUNKS_FILE, INDEX_FILE, OLLAMA_BASE_URL
+from config import (
+    CHAT_MODEL,
+    CHUNKS_FILE,
+    INDEX_FILE,
+    KEEP_ALIVE,
+    NUM_CTX,
+    OLLAMA_BASE_URL,
+)
 from vectorstore import embed_texts
 
 TOP_K = 5
 MEMORY_TURNS = 4
+
+# Seconds to wait before retrying a failed call -- see call_llama() for why a
+# retry must not fire immediately.
+RETRY_BACKOFF = 30
 
 SYSTEM_PROMPT = (
     "You are a helpful assistant answering questions about a set of research papers "
@@ -57,26 +69,62 @@ def format_context(retrieved_chunks) -> str:
     return "\n\n".join(blocks)
 
 
-def call_llama(messages, timeout: int = 300, max_retries: int = 2) -> str:
+def call_llama(messages, timeout: int = 300, max_retries: int = 2, json_mode: bool = False) -> str:
     """Send a messages list to llama3.2 via Ollama's /api/chat and return the reply text.
 
     Retries once on a read timeout -- later turns carry a larger prompt (full
     memory history + retrieved context), which can occasionally exceed a
     single attempt's timeout on a slow/loaded local machine.
+
+    Args:
+        json_mode: when True, asks Ollama to constrain decoding so the reply is
+            always valid JSON. Used by the evaluation judge, whose reply has to
+            be machine-parsed; normal chat answers are prose and leave it off.
+
+    Two Ollama options are set explicitly on every call:
+
+      num_ctx     Ollama's default context window is 2048 tokens. A prompt here
+                  carries 5 retrieved chunks (~1,400 tokens) plus the system
+                  prompt, the question, and up to 4 turns of memory -- roughly
+                  2,100 tokens once memory fills, i.e. over the default. Ollama
+                  truncates silently rather than erroring, so leaving this unset
+                  would quietly discard the oldest part of the prompt (the
+                  earliest memory turns) on later questions.
+      keep_alive  How long the model stays resident in memory between calls.
+                  An evaluation run makes ~20 calls; without this, Ollama can
+                  unload and reload llama3.2 repeatedly.
     """
+    payload = {
+        "model": CHAT_MODEL,
+        "messages": messages,
+        "stream": False,
+        "options": {"num_ctx": NUM_CTX},
+        "keep_alive": KEEP_ALIVE,
+    }
+    if json_mode:
+        payload["format"] = "json"
+
     for attempt in range(1, max_retries + 1):
         try:
             response = requests.post(
                 f"{OLLAMA_BASE_URL}/api/chat",
-                json={"model": CHAT_MODEL, "messages": messages, "stream": False},
+                json=payload,
                 timeout=timeout,
             )
             response.raise_for_status()
             return response.json()["message"]["content"]
-        except requests.exceptions.ReadTimeout:
+        except (requests.exceptions.ReadTimeout, requests.exceptions.HTTPError) as error:
             if attempt == max_retries:
                 raise
-            print(f"  call_llama timed out (attempt {attempt}/{max_retries}) -- retrying")
+            # A read timeout is client-side only: Ollama keeps working on the
+            # request we gave up waiting for. Retrying immediately therefore
+            # puts a SECOND generation in flight alongside the first, and two
+            # concurrent num_ctx-sized KV caches is enough to make the server
+            # return a 500. Pausing before the retry lets the original finish
+            # and the memory be released first.
+            print(f"  call_llama failed (attempt {attempt}/{max_retries}): "
+                  f"{type(error).__name__} -- waiting {RETRY_BACKOFF}s before retry")
+            time.sleep(RETRY_BACKOFF)
 
 
 class ChatSession:

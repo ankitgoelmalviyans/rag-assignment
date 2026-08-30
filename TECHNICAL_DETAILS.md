@@ -202,7 +202,7 @@ data/eval/questions.json  (10 questions, several pronoun-based memory follow-ups
 │    → + retrieved context, + conversation history available,        │
 │      + the question, + the candidate answer                        │
 │                                                                     │
-│  raw = call_llama(messages, timeout=300)  ← a SECOND, SEPARATE     │
+│  raw = call_llama(messages, json_mode=True) ← a SECOND, SEPARATE   │
 │                                              LLM call — "the judge" │
 │                                                                     │
 │  scores = json.loads(raw)   (with truncation-repair fallback)      │
@@ -500,20 +500,52 @@ Turns the list of chunk dicts into one plain-text block, each chunk prefixed wit
 human-readable source label. This is what gets inserted into the LLM's prompt — by the time
 the LLM sees it, it's indistinguishable from a person having pasted 5 excerpts into the chat.
 
-### `call_llama(messages, timeout=180) -> str`
+### `call_llama(messages, timeout=300, max_retries=2, json_mode=False) -> str`
 ```python
-response = requests.post(f"{OLLAMA_BASE_URL}/api/chat",
-                          json={"model": CHAT_MODEL, "messages": messages, "stream": False},
-                          timeout=timeout)
+payload = {
+    "model": CHAT_MODEL,
+    "messages": messages,
+    "stream": False,
+    "options": {"num_ctx": NUM_CTX},   # 8192
+    "keep_alive": KEEP_ALIVE,          # "30m"
+}
+if json_mode:
+    payload["format"] = "json"
+
+response = requests.post(f"{OLLAMA_BASE_URL}/api/chat", json=payload, timeout=timeout)
 response.raise_for_status()
 return response.json()["message"]["content"]
 ```
 One HTTP call to Ollama's chat endpoint. `messages` follows the standard chat-format list of
 `{"role": ..., "content": ...}` dicts (`system`/`user`/`assistant`) — the same shape used by
 OpenAI's API and most chat-model APIs. `stream: False` means we wait for the full response
-rather than receiving it token-by-token. The `timeout` parameter was made configurable
-(default 180s) specifically because the evaluation stage needed a longer allowance for its
-longer judge prompts — see section 8 and section 11.
+rather than receiving it token-by-token.
+
+#### The three Ollama options, and why each is set
+
+**`num_ctx: 8192` — this one fixes a real correctness bug.** Ollama's default context window is
+**2048 tokens**. Measured against this corpus: chunks average 207 words, so 5 retrieved chunks
+≈ 1,035 words ≈ **1,400 tokens**; add the system prompt (~60), the question (~25), and four
+turns of conversation memory (~600) and a full prompt lands near **2,100 tokens**. That is over
+the default — and Ollama *truncates silently rather than erroring*, so the oldest part of the
+prompt (the earliest memory turns) was being dropped before the model ever saw it, on exactly
+the later questions where memory matters most. Setting this explicitly means the model now
+receives the whole prompt. Verified: `/api/ps` reports `context_length: 8192`. (Token figures
+are estimates from word counts at ~1.35 tokens/word, not exact tokenizer output — but the
+margin is narrow enough that the conclusion holds either way.)
+
+**`keep_alive: "30m"`** — how long Ollama keeps the model resident between calls. An evaluation
+run makes roughly 20 calls; without this, Ollama can unload and reload `llama3.2` (a ~2 GB
+model) repeatedly.
+
+**`format: "json"`, judge calls only** — asks Ollama to constrain decoding so the reply is
+valid JSON by construction. Normal chat answers are prose and leave this off; the evaluation
+judge's reply has to be machine-parsed, and in an earlier run one reply came back wrapped in
+explanatory prose and could not be parsed, costing that question its score entirely. This
+removes that failure mode at the source rather than repairing it afterwards.
+
+The `timeout` parameter (default 300s) and a one-shot retry exist because local CPU inference
+on longer prompts is measured in minutes — see section 8 and section 11.
 
 ### `ChatSession` class — the memory mechanism
 ```python
@@ -624,7 +656,8 @@ into something an LLM can score consistently.
 
 ### `judge_answer(record) -> dict`
 ```python
-raw = call_llama(build_judge_messages(record))   # timeout+retry handled inside call_llama itself
+raw = call_llama(build_judge_messages(record), json_mode=True)   # Ollama constrains output to JSON;
+                                                                 # timeout + retry live in call_llama
 
 cleaned = raw.strip()
 if cleaned.startswith("```"):                            # strip markdown fences if present
@@ -647,29 +680,67 @@ if missing_braces > 0:
 
 return {"parse_error": True, "raw_response": raw}          # give up cleanly, don't crash
 ```
-This function evolved directly from real failures during testing: an early run crashed
-entirely when one judge call exceeded the (then-hardcoded) 180-second timeout — fixed by
-raising `bot.py`'s `call_llama()` default timeout to 300s and adding a built-in retry there
-(so every caller benefits, not just the judge). A separate failure — one response got cut
-off by the model one token early, missing its closing `}` — led to the brace-repair fallback
-here. If parsing still fails after all of that, the record is marked `parse_error: true` and
-the run continues rather than crashing over one bad response.
+This function evolved directly from real failures during testing, in three stages:
+
+1. **A timeout crash.** An early run died entirely when one judge call exceeded the
+   then-hardcoded 180-second limit. Fixed by raising `call_llama()`'s default to 300s and
+   adding a built-in retry there, so every caller benefits rather than just the judge.
+2. **A truncated response.** The model once stopped a token early, omitting its closing `}`,
+   which produced invalid JSON. That led to the brace-repair fallback shown above.
+3. **A prose-wrapped response.** On a later run the model returned its JSON inside
+   explanatory prose, which neither the fence-stripping nor the brace repair could rescue —
+   question 10 went unscored (n=9/10). The fix was to stop repairing output after the fact and
+   constrain it at the source: `json_mode=True` sets Ollama's `format: "json"`, which forces
+   valid JSON by construction.
+4. **A 500 that destroyed an entire run.** After the `num_ctx` fix, one judge call hit the
+   client-side timeout, retried immediately, and the retry came back
+   `500 Internal Server Error`. Two separate defects were behind this:
+
+   - **The retry made things worse.** A read timeout is *client-side only* — Ollama carries on
+     generating the request we stopped waiting for. Retrying at once therefore put a second
+     generation in flight beside the first, and two concurrent `num_ctx`-sized KV caches were
+     enough to make the server fail. Fixed by pausing `RETRY_BACKOFF` seconds before a retry so
+     the original can finish and release its memory.
+   - **One bad call took down the whole process.** The exception propagated out of
+     `judge_answer()`, past nine already-completed judgements, and killed the run before
+     anything was written — roughly twenty minutes of work lost to a single failed HTTP call.
+     Fixed by catching `requests.exceptions.RequestException` in `judge_answer()` and recording
+     it as `parse_error` for that one question. One unscored question is a footnote in the
+     results; an aborted run is a lost afternoon.
+
+The cleanup and repair steps are deliberately kept as cheap insurance behind JSON mode rather
+than removed. If parsing still fails after all of that, the record is marked
+`parse_error: true` and the run continues rather than crashing over one bad response.
 
 ### `summarize(records)`
 Averages each of the four criteria's scores across all successfully-parsed records, printed
 to the console as the evaluation's headline result.
 
-**Actual result from a real run of this project:**
+**Actual results from real runs — same rubric and same questions, before and after the
+`num_ctx` / JSON-mode fixes described above:**
 
-| Criterion | Average (out of 5) | As % | n |
-|---|---|---|---|
-| Relevance | 4.89 | 97.8% | 9 |
-| Accuracy | 5.00 | 100% | 9 |
-| Contextual Awareness | 5.00 | 100% | 9 |
-| Response Quality | 4.33 | 86.6% | 9 |
+| Criterion | Before fixes | After fixes |
+|---|---|---|
+| Relevance | 4.89 (97.8%) | 4.80 (96.0%) |
+| Accuracy | 5.00 (100%) | 5.00 (100%) |
+| Contextual Awareness | 5.00 (100%) | 4.90 (98.0%) |
+| Response Quality | 4.33 (86.6%) | 4.50 (90.0%) |
+| **Questions scored** | **9 / 10** | **10 / 10** |
 
-(n=9 rather than 10 — question 10's judge response failed to parse even after the repair
-fallback; see section 12.)
+**Read the `n` row, not the score rows.** Going from 9/10 to 10/10 is the one change with a
+clear, traceable cause: `format: "json"` makes the judge's reply valid JSON by construction, so
+question 10 — previously unparseable and therefore unscored — now scores (5/5/5/5).
+
+The score columns moved in *both* directions and should not be claimed as an improvement. Two
+variables changed between the runs (`num_ctx` now prevents prompt truncation, and answer lengths
+shifted), and each column is a single run of a non-deterministic model rather than an average
+over several. A ±0.1 difference on a 1–5 scale across 10 questions is noise, not signal. The
+honest claim is that the fixes made the evaluation **complete and reliable**, not measurably
+better.
+
+For reference, the parallel LangChain implementation on the `UseLangchain` branch scored
+Relevance 5.00, Accuracy 5.00, Contextual Awareness 5.00, Response Quality 4.90, also at 10/10 —
+subject to exactly the same caveat.
 
 ---
 
@@ -827,6 +898,16 @@ script in the repository. This section is that documentation.
   offline fallback.
 - **Scripts must be run from the project root**, not from inside `src/` — the relative paths
   in `config.py` resolve against the current working directory, not the script's location.
+- **The positional join's fragility is real, and was hit in practice.** `data/processed/` is
+  gitignored (the artifacts are regeneratable), so switching git branches does *not* restore the
+  matching artifacts. After a parallel LangChain implementation regenerated `chunks.json` with a
+  different schema and a different chunk count, returning to this branch left `chunks.json` (527
+  entries, `page` field) paired with `faiss.index` (398 vectors) — a desynced pair. The immediate
+  symptom was a loud `KeyError: 'page_start'`, which was lucky: had the two schemas matched and
+  only the *order* differed, there would have been no error at all, just silently wrong citations.
+  That is precisely the failure mode the "no ID-based lookup" design invites. The fix is to
+  regenerate both artifacts together (`chunking.py` then `vectorstore.py`), and the general
+  lesson is that the invariant is only safe while nothing else ever writes those files.
 
 ---
 

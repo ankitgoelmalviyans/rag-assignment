@@ -23,6 +23,8 @@ config) -- documented as a challenge encountered in TECHNICAL_DETAILS.md.
 
 import json
 
+import requests
+
 from bot import ChatSession, call_llama, load_chunks_and_index, retrieve
 from config import QUESTIONS_FILE, RESULTS_FILE
 
@@ -123,8 +125,26 @@ def build_judge_messages(record):
 
 
 def judge_answer(record):
-    """Call the LLM as an impartial judge and parse its JSON scoring."""
-    raw = call_llama(build_judge_messages(record))
+    """Call the LLM as an impartial judge and parse its JSON scoring.
+
+    json_mode=True asks Ollama to constrain decoding to valid JSON, so the
+    reply is parseable by construction. Without it, the model occasionally
+    wrapped its JSON in explanatory prose or stopped a token early, which cost
+    one question its score in an earlier run. The cleanup and repair steps
+    below are kept as cheap insurance rather than the primary defence.
+
+    A failed call is recorded and skipped rather than raised. An earlier run
+    lost nine completed judgements because the tenth call returned a 500 and
+    took the whole process down with it -- roughly twenty minutes of work
+    thrown away over one bad response. One unscored question is a footnote in
+    the results; an aborted run is a lost afternoon.
+    """
+    try:
+        raw = call_llama(build_judge_messages(record), json_mode=True)
+    except requests.exceptions.RequestException as error:
+        print(f"  [warn] judge call failed ({type(error).__name__}) for: "
+              f"{record['question'][:60]}...")
+        return {"parse_error": True, "raw_response": f"request failed: {error}"}
 
     cleaned = raw.strip()
     if cleaned.startswith("```"):
@@ -165,8 +185,16 @@ def summarize(records):
     print("\n--- Evaluation summary ---")
     for c in criteria:
         scores = totals[c]
-        avg = sum(scores) / len(scores) if scores else float("nan")
-        print(f"  {c:22s} avg = {avg:.2f}  (n={len(scores)})")
+        if scores:
+            avg = sum(scores) / len(scores)
+            print(f"  {c:22s} avg = {avg:.2f}/5  ({avg / 5 * 100:.1f}%)  (n={len(scores)})")
+        else:
+            print(f"  {c:22s} no valid scores")
+
+    unscored = sum(1 for r in records if r["judge"].get("parse_error"))
+    if unscored:
+        print(f"\n  note: {unscored} of {len(records)} question(s) could not be scored "
+              f"(see parse_error entries in the results file)")
 
 
 if __name__ == "__main__":
