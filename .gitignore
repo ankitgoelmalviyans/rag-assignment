@@ -15,6 +15,10 @@ data/processed/
 # excludes the generated output files)
 data/eval/results*.json
 
+# Submission export -- a copy of already-tracked files assembled for
+# handing in, not something to version control itself
+submission/
+
 # OS junk
 .DS_Store
 Thumbs.db
