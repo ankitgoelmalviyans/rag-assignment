@@ -1,0 +1,50 @@
+# Terraform: deterministic policy first (conftest/OPA), AI explanation second,
+# human approval always for apply.
+name: Infra plan review
+
+on:
+  pull_request:
+    paths: ["devops/terraform/**"]
+
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write   # OIDC to the cloud: no long-lived keys in GitHub
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: devops/terraform
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+
+      # Plan-only role: can read state and describe resources, cannot change them.
+      # - uses: aws-actions/configure-aws-credentials@v4
+      #   with: { role-to-assume: arn:aws:iam::123456789012:role/tf-plan-readonly, aws-region: us-east-1 }
+
+      - run: terraform init -backend=false
+      - run: terraform validate
+      - run: terraform plan -out=tfplan -lock=false || true
+      - run: terraform show -json tfplan > plan.json || echo '{}' > plan.json
+
+      - name: Policy as code (hard gate)
+        uses: open-policy-agent/conftest-action@v1   # or: conftest test plan.json -p ../policy
+        with:
+          files: devops/terraform/plan.json
+          policy: devops/policy
+
+      - name: AI plan summary (advisory)
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            Summarise devops/terraform/plan.json for a reviewer: what is created/changed/DESTROYED,
+            blast radius, cost-relevant resources, and anything that weakens security.
+            Put destroys and IAM changes at the top.
+          claude_args: --allowedTools "Read" --max-turns 5
+
+  # apply lives in a separate workflow on main, behind a GitHub Environment
+  # with required reviewers -- never auto-applied from an AI suggestion.

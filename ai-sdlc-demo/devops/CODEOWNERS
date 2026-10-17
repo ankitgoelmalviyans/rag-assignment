@@ -1,0 +1,8 @@
+# Copy to .github/CODEOWNERS. Paths an AI agent may propose changes to,
+# but a named human team must approve.
+*                         @acme/engineering
+/safe_rag/policy.py       @acme/security
+/safe_rag/guardrails.py   @acme/security
+/devops/                  @acme/platform @acme/security
+/.github/                 @acme/platform
+/.claude/                 @acme/platform @acme/security

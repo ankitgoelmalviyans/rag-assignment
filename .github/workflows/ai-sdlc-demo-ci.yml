@@ -1,0 +1,35 @@
+# Real CI for the ai-sdlc-demo folder (the templates in ai-sdlc-demo/devops/
+# are examples and do not run).
+name: ai-sdlc-demo CI
+
+on:
+  push:
+    paths: ["ai-sdlc-demo/**", ".github/workflows/ai-sdlc-demo-ci.yml"]
+  pull_request:
+    paths: ["ai-sdlc-demo/**", ".github/workflows/ai-sdlc-demo-ci.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: ai-sdlc-demo
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest
+      - run: python -m pytest -q
+      - name: Hooks block what they should
+        run: |
+          set +e
+          echo '{"tool_input":{"command":"git push --force origin main"}}' | python .claude/hooks/guard_bash.py
+          test $? -eq 2 || { echo "guard_bash did not block force push"; exit 1; }
+          echo '{"tool_input":{"file_path":".env","content":"x"}}' | python .claude/hooks/guard_files.py
+          test $? -eq 2 || { echo "guard_files did not block .env"; exit 1; }
+          echo "hooks OK"

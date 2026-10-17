@@ -1,0 +1,41 @@
+# When CI fails, have AI read the logs and post a diagnosis (and optionally a
+# suggested patch) -- but never push to the branch itself.
+name: AI CI failure triage
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: write
+
+jobs:
+  triage:
+    if: github.event.workflow_run.conclusion == 'failure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Download failed job logs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run view ${{ github.event.workflow_run.id }} --log-failed > failed.log || true
+          # Strip anything that looks like a secret before the model sees it.
+          sed -E -i 's/(AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{36}|sk-ant-[A-Za-z0-9_-]+)/[REDACTED]/g' failed.log
+          tail -c 60000 failed.log > failed.tail.log
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            Read failed.tail.log and the relevant source. Post a PR comment with:
+            1) root cause (not "flaky" unless you can prove it), 2) the failing test/file:line,
+            3) a minimal suggested patch as a diff block. Do not modify files or push.
+          claude_args: --allowedTools "Read,Grep,Glob" --max-turns 15
