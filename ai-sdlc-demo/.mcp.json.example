@@ -1,0 +1,10 @@
+{
+  "_comment": "Rename to .mcp.json to enable. Start every MCP integration read-only, with a token scoped to the minimum (fine-grained PAT: one repo, read-only). Tokens come from env vars, never committed.",
+  "mcpServers": {
+    "github": {
+      "type": "http",
+      "url": "https://api.githubcopilot.com/mcp/readonly",
+      "headers": { "Authorization": "Bearer ${GITHUB_READONLY_TOKEN}" }
+    }
+  }
+}
